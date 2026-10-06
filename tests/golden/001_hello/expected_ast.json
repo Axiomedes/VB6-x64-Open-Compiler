@@ -1,0 +1,38 @@
+{
+  "declarations": [
+    {
+      "Sub": {
+        "visibility": "Default",
+        "name": "Main",
+        "params": [],
+        "body": [
+          {
+            "Call": {
+              "name": "MsgBox",
+              "arguments": [
+                {
+                  "Literal": {
+                    "String": "Hello VB6"
+                  }
+                }
+              ],
+              "has_call_keyword": false,
+              "span": {
+                "start_line": 2,
+                "start_col": 5,
+                "end_line": 2,
+                "end_col": 11
+              }
+            }
+          }
+        ],
+        "span": {
+          "start_line": 1,
+          "start_col": 1,
+          "end_line": 3,
+          "end_col": 8
+        }
+      }
+    }
+  ]
+}

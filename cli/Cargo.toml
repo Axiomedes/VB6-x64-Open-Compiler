@@ -1,0 +1,24 @@
+[package]
+name = "vb6c"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "vb6c"
+path = "src/main.rs"
+
+[dependencies]
+vb6-compiler = { path = "../compiler" }
+vb6-project = { path = "../project" }
+vb6-runtime = { path = "../runtime" }
+vb6-backend = { path = "../backend" }
+vb6-linker = { path = "../linker" }
+clap.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]

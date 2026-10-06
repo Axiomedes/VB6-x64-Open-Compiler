@@ -1,0 +1,26 @@
+# Build outputs
+target/
+build/
+bin/
+obj/
+*.exe
+*.dll
+*.lib
+*.exp
+*.pdb
+*.ilk
+*.obj
+
+# Editor & OS files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+Thumbs.db
+[Dd]esktop.ini
+
+# Test artifacts and temporary outputs
+tests/temp/
+tests/output/
+*.log

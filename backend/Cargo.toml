@@ -1,0 +1,14 @@
+[package]
+name = "vb6-backend"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+vb6-compiler = { path = "../compiler" }
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
