@@ -7,53 +7,110 @@ use thiserror::Error;
 pub enum LexerError {
     #[error("Unterminated string literal at line {0}, col {1}")]
     UnterminatedString(usize, usize),
+    #[error("Unterminated date literal at line {0}, col {1}")]
+    UnterminatedDate(usize, usize),
     #[error("Unexpected character '{0}' at line {1}, col {2}")]
     UnexpectedCharacter(char, usize, usize),
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenKind {
-    // Keywords
+    // Declarations
     Sub,
     Function,
+    Property,
+    Get,
     End,
-    Call,
-    Set,
-    Let,
     Dim,
+    ReDim,
+    Preserve,
+    Static,
+    Const,
     As,
+    New,
     Public,
     Private,
     Friend,
     ByVal,
     ByRef,
     Optional,
+    ParamArray,
+
+    // Flow control
+    If,
+    Then,
+    Else,
+    ElseIf,
+    Select,
+    Case,
+    For,
+    To,
+    Step,
+    Next,
+    Each,
+    In,
+    Do,
+    While,
+    Until,
+    Loop,
+    Wend,
+    With,
+    Exit,
+    GoTo,
+    On,
+    Error,
+    Resume,
+
+    // Statements & calls
+    Call,
+    Set,
+    Let,
+    Debug,
+    Print,
+
+    // Literals & Identifiers
     True,
     False,
     Null,
     Empty,
-
-    // Identifiers & Literals
+    Nothing,
     Identifier(String),
     StringLiteral(String),
     IntegerLiteral(i32),
     DoubleLiteral(f64),
+    DateLiteral(String),
 
-    // Symbols & Punctuation
+    // Operators
+    Plus,
+    Minus,
+    Asterisk,
+    Slash,
+    Backslash, // Integer division \
+    Caret,     // Exponentiation ^
+    Ampersand, // String concatenation &
+    Mod,
+    Equals,
+    NotEquals,
+    LessThan,
+    LessThanOrEqual,
+    GreaterThan,
+    GreaterThanOrEqual,
+    And,
+    Or,
+    Xor,
+    Eqv,
+    Imp,
+    Not,
+    Is,
+    Like,
+
+    // Punctuation & Delimiters
     LParen,
     RParen,
     Comma,
     Dot,
     Colon,
-    Equals,
-    NotEquals,
-    LessThan,
-    GreaterThan,
-    Plus,
-    Minus,
-    Asterisk,
-    Slash,
-    Ampersand,
+    Semicolon,
 
     // Structure
     Newline,
@@ -124,17 +181,17 @@ impl<'a> Lexer<'a> {
             let start_line = self.line;
             let start_col = self.col;
 
-            // Handle whitespace (excluding newlines)
+            // Whitespace (excluding newlines)
             if ch == ' ' || ch == '\t' || ch == '\r' {
                 self.advance();
                 continue;
             }
 
-            // Handle line continuation: ' _' followed by newline
+            // Line continuation: '_' followed by newline
             if ch == '_' {
                 if let Some(next) = self.peek_next() {
                     if next == '\r' || next == '\n' {
-                        self.advance(); // consume '_'
+                        self.advance();
                         if self.peek() == Some('\r') {
                             self.advance();
                         }
@@ -146,7 +203,7 @@ impl<'a> Lexer<'a> {
                 }
             }
 
-            // Handle Newlines
+            // Newline
             if ch == '\n' {
                 self.advance();
                 tokens.push(Token {
@@ -156,7 +213,7 @@ impl<'a> Lexer<'a> {
                 continue;
             }
 
-            // Handle Comments: single quote '
+            // Comments: '
             if ch == '\'' {
                 self.advance();
                 let mut comment = String::new();
@@ -174,27 +231,51 @@ impl<'a> Lexer<'a> {
                 continue;
             }
 
-            // Handle String Literals: "..."
+            // Date Literals: #...#
+            if ch == '#' {
+                self.advance();
+                let mut date_str = String::new();
+                let mut closed = false;
+                while let Some(c) = self.peek() {
+                    if c == '#' {
+                        self.advance();
+                        closed = true;
+                        break;
+                    } else if c == '\n' || c == '\r' {
+                        break;
+                    } else {
+                        date_str.push(c);
+                        self.advance();
+                    }
+                }
+                if !closed {
+                    return Err(LexerError::UnterminatedDate(start_line, start_col));
+                }
+                tokens.push(Token {
+                    kind: TokenKind::DateLiteral(date_str),
+                    span: Span::new(start_line, start_col, self.line, self.col),
+                });
+                continue;
+            }
+
+            // String Literals: "..."
             if ch == '"' {
-                self.advance(); // consume opening quote
+                self.advance();
                 let mut string_val = String::new();
                 let mut closed = false;
 
                 while let Some(c) = self.peek() {
                     if c == '"' {
                         if self.peek_next() == Some('"') {
-                            // Escaped double quote ("")
                             self.advance();
                             self.advance();
                             string_val.push('"');
                         } else {
-                            // Closing quote
                             self.advance();
                             closed = true;
                             break;
                         }
                     } else if c == '\n' || c == '\r' {
-                        // In VB6, string literals cannot span across unescaped newlines
                         return Err(LexerError::UnterminatedString(start_line, start_col));
                     } else {
                         string_val.push(c);
@@ -213,7 +294,63 @@ impl<'a> Lexer<'a> {
                 continue;
             }
 
-            // Handle Numbers
+            // Hex or Octal numbers: &H... or &O... or standalone & (concatenation)
+            if ch == '&' {
+                if let Some(next) = self.peek_next() {
+                    if next.eq_ignore_ascii_case(&'h') {
+                        // Hexadecimal literal &H1F
+                        self.advance(); // &
+                        self.advance(); // H
+                        let mut hex_str = String::new();
+                        while let Some(c) = self.peek() {
+                            if c.is_ascii_hexdigit() {
+                                hex_str.push(c);
+                                self.advance();
+                            } else {
+                                break;
+                            }
+                        }
+                        // Optional suffix & or %
+                        if self.peek() == Some('&') || self.peek() == Some('%') {
+                            self.advance();
+                        }
+                        let val = i32::from_str_radix(&hex_str, 16).unwrap_or(0);
+                        tokens.push(Token {
+                            kind: TokenKind::IntegerLiteral(val),
+                            span: Span::new(start_line, start_col, self.line, self.col),
+                        });
+                        continue;
+                    } else if next.eq_ignore_ascii_case(&'o') {
+                        // Octal literal &O77
+                        self.advance(); // &
+                        self.advance(); // O
+                        let mut oct_str = String::new();
+                        while let Some(c) = self.peek() {
+                            if ('0'..='7').contains(&c) {
+                                oct_str.push(c);
+                                self.advance();
+                            } else {
+                                break;
+                            }
+                        }
+                        let val = i32::from_str_radix(&oct_str, 8).unwrap_or(0);
+                        tokens.push(Token {
+                            kind: TokenKind::IntegerLiteral(val),
+                            span: Span::new(start_line, start_col, self.line, self.col),
+                        });
+                        continue;
+                    }
+                }
+                // Standalone & operator (string concatenation)
+                self.advance();
+                tokens.push(Token {
+                    kind: TokenKind::Ampersand,
+                    span: Span::new(start_line, start_col, self.line, self.col),
+                });
+                continue;
+            }
+
+            // Decimal Numbers
             if ch.is_ascii_digit() {
                 let mut num_str = String::new();
                 let mut is_double = false;
@@ -226,8 +363,22 @@ impl<'a> Lexer<'a> {
                         is_double = true;
                         num_str.push(c);
                         self.advance();
+                    } else if (c == 'e' || c == 'E') && !is_double {
+                        is_double = true;
+                        num_str.push(c);
+                        self.advance();
+                        if self.peek() == Some('+') || self.peek() == Some('-') {
+                            num_str.push(self.advance().unwrap());
+                        }
                     } else {
                         break;
+                    }
+                }
+
+                // Optional type suffixes on numbers (e.g. 10&, 10#, 10!)
+                if let Some(c) = self.peek() {
+                    if c == '&' || c == '%' || c == '!' || c == '#' || c == '@' {
+                        self.advance();
                     }
                 }
 
@@ -244,13 +395,40 @@ impl<'a> Lexer<'a> {
                 continue;
             }
 
-            // Handle Identifiers and Keywords
+            // Escaped Bracket Identifiers: [Select], [Group]
+            if ch == '[' {
+                self.advance();
+                let mut id = String::new();
+                while let Some(c) = self.peek() {
+                    if c == ']' {
+                        self.advance();
+                        break;
+                    } else if c == '\n' || c == '\r' {
+                        break;
+                    } else {
+                        id.push(c);
+                        self.advance();
+                    }
+                }
+                tokens.push(Token {
+                    kind: TokenKind::Identifier(id),
+                    span: Span::new(start_line, start_col, self.line, self.col),
+                });
+                continue;
+            }
+
+            // Identifiers and Keywords
             if ch.is_alphabetic() || ch == '_' {
                 let mut id = String::new();
                 while let Some(c) = self.peek() {
                     if c.is_alphanumeric() || c == '_' {
                         id.push(c);
                         self.advance();
+                    } else if c == '%' || c == '&' || c == '!' || c == '#' || c == '$' || c == '@' {
+                        // Type suffix character at end of identifier
+                        id.push(c);
+                        self.advance();
+                        break;
                     } else {
                         break;
                     }
@@ -273,26 +451,69 @@ impl<'a> Lexer<'a> {
                     continue;
                 }
 
-                // Match keywords case-insensitively
+                // Case-insensitive keywords
                 let kind = match id.to_ascii_uppercase().as_str() {
                     "SUB" => TokenKind::Sub,
                     "FUNCTION" => TokenKind::Function,
+                    "PROPERTY" => TokenKind::Property,
+                    "GET" => TokenKind::Get,
                     "END" => TokenKind::End,
-                    "CALL" => TokenKind::Call,
-                    "SET" => TokenKind::Set,
-                    "LET" => TokenKind::Let,
                     "DIM" => TokenKind::Dim,
+                    "REDIM" => TokenKind::ReDim,
+                    "PRESERVE" => TokenKind::Preserve,
+                    "STATIC" => TokenKind::Static,
+                    "CONST" => TokenKind::Const,
                     "AS" => TokenKind::As,
+                    "NEW" => TokenKind::New,
                     "PUBLIC" => TokenKind::Public,
                     "PRIVATE" => TokenKind::Private,
                     "FRIEND" => TokenKind::Friend,
                     "BYVAL" => TokenKind::ByVal,
                     "BYREF" => TokenKind::ByRef,
                     "OPTIONAL" => TokenKind::Optional,
+                    "PARAMARRAY" => TokenKind::ParamArray,
+                    "IF" => TokenKind::If,
+                    "THEN" => TokenKind::Then,
+                    "ELSE" => TokenKind::Else,
+                    "ELSEIF" => TokenKind::ElseIf,
+                    "SELECT" => TokenKind::Select,
+                    "CASE" => TokenKind::Case,
+                    "FOR" => TokenKind::For,
+                    "TO" => TokenKind::To,
+                    "STEP" => TokenKind::Step,
+                    "NEXT" => TokenKind::Next,
+                    "EACH" => TokenKind::Each,
+                    "IN" => TokenKind::In,
+                    "DO" => TokenKind::Do,
+                    "WHILE" => TokenKind::While,
+                    "UNTIL" => TokenKind::Until,
+                    "LOOP" => TokenKind::Loop,
+                    "WEND" => TokenKind::Wend,
+                    "WITH" => TokenKind::With,
+                    "EXIT" => TokenKind::Exit,
+                    "GOTO" => TokenKind::GoTo,
+                    "ON" => TokenKind::On,
+                    "ERROR" => TokenKind::Error,
+                    "RESUME" => TokenKind::Resume,
+                    "CALL" => TokenKind::Call,
+                    "SET" => TokenKind::Set,
+                    "LET" => TokenKind::Let,
+                    "DEBUG" => TokenKind::Debug,
+                    "PRINT" => TokenKind::Print,
                     "TRUE" => TokenKind::True,
                     "FALSE" => TokenKind::False,
                     "NULL" => TokenKind::Null,
                     "EMPTY" => TokenKind::Empty,
+                    "NOTHING" => TokenKind::Nothing,
+                    "MOD" => TokenKind::Mod,
+                    "AND" => TokenKind::And,
+                    "OR" => TokenKind::Or,
+                    "XOR" => TokenKind::Xor,
+                    "EQV" => TokenKind::Eqv,
+                    "IMP" => TokenKind::Imp,
+                    "NOT" => TokenKind::Not,
+                    "IS" => TokenKind::Is,
+                    "LIKE" => TokenKind::Like,
                     _ => TokenKind::Identifier(id),
                 };
 
@@ -303,7 +524,7 @@ impl<'a> Lexer<'a> {
                 continue;
             }
 
-            // Handle Punctuation and Operators
+            // Punctuation and Operators
             self.advance();
             let kind = match ch {
                 '(' => TokenKind::LParen,
@@ -311,21 +532,33 @@ impl<'a> Lexer<'a> {
                 ',' => TokenKind::Comma,
                 '.' => TokenKind::Dot,
                 ':' => TokenKind::Colon,
+                ';' => TokenKind::Semicolon,
                 '=' => TokenKind::Equals,
                 '+' => TokenKind::Plus,
                 '-' => TokenKind::Minus,
                 '*' => TokenKind::Asterisk,
                 '/' => TokenKind::Slash,
-                '&' => TokenKind::Ampersand,
+                '\\' => TokenKind::Backslash,
+                '^' => TokenKind::Caret,
                 '<' => {
                     if self.peek() == Some('>') {
                         self.advance();
                         TokenKind::NotEquals
+                    } else if self.peek() == Some('=') {
+                        self.advance();
+                        TokenKind::LessThanOrEqual
                     } else {
                         TokenKind::LessThan
                     }
                 }
-                '>' => TokenKind::GreaterThan,
+                '>' => {
+                    if self.peek() == Some('=') {
+                        self.advance();
+                        TokenKind::GreaterThanOrEqual
+                    } else {
+                        TokenKind::GreaterThan
+                    }
+                }
                 _ => return Err(LexerError::UnexpectedCharacter(ch, start_line, start_col)),
             };
 
