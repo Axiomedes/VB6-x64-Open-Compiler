@@ -18,6 +18,9 @@ pub struct Toolchain {
     clang_path: PathBuf,
 }
 
+use std::sync::atomic::{AtomicU64, Ordering};
+static TOOLCHAIN_COUNTER: AtomicU64 = AtomicU64::new(0);
+
 impl Toolchain {
     pub fn discover() -> Result<Self, ToolchainError> {
         let candidates = [
@@ -59,8 +62,13 @@ impl Toolchain {
         llvm_ir: &str,
         output_obj: &Path,
     ) -> Result<(), ToolchainError> {
+        let count = TOOLCHAIN_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
         let temp_dir = std::env::temp_dir();
-        let temp_ll = temp_dir.join(format!("vb6_tmp_{}.ll", std::process::id()));
+        let temp_ll = temp_dir.join(format!("vb6_tmp_{}_{}_{}.ll", std::process::id(), time, count));
         std::fs::write(&temp_ll, llvm_ir)?;
 
         let output = Command::new(&self.clang_path)

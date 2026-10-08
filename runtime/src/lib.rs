@@ -13,3 +13,10 @@ pub mod io;
 pub mod math;
 pub mod strings;
 pub mod variants;
+
+pub use core::*;
+
+/// Returns the embedded C source code for the standalone static runtime.
+pub fn get_runtime_c_source() -> &'static str {
+    include_str!("../c/vb6_runtime.c")
+}

@@ -85,6 +85,29 @@ impl LlvmEmitter {
             out.push('\n');
         }
 
+        // Collect and emit string constants
+        let mut string_constants: HashMap<String, String> = HashMap::new();
+        let mut str_counter = 0usize;
+
+        for func in &module.functions {
+            for block in &func.blocks {
+                for inst in &block.instructions {
+                    self.collect_strings_from_instruction(inst, &mut string_constants, &mut str_counter);
+                }
+            }
+        }
+
+        for (str_val, global_name) in &string_constants {
+            let (escaped, len) = escape_llvm_string(str_val);
+            out.push_str(&format!(
+                "{} = private unnamed_addr constant [{} x i8] {}, align 1\n",
+                global_name, len, escaped
+            ));
+        }
+        if !string_constants.is_empty() {
+            out.push('\n');
+        }
+
         let mut has_main_sub = false;
 
         // Functions
@@ -92,7 +115,7 @@ impl LlvmEmitter {
             if func.name.eq_ignore_ascii_case("Main") {
                 has_main_sub = true;
             }
-            out.push_str(&self.emit_function(func));
+            out.push_str(&self.emit_function(func, &string_constants));
             out.push('\n');
         }
 
@@ -111,7 +134,52 @@ impl LlvmEmitter {
         out
     }
 
-    fn emit_function(&self, func: &IrFunction) -> String {
+    fn collect_strings_from_instruction(
+        &self,
+        inst: &IrInstruction,
+        string_constants: &mut HashMap<String, String>,
+        str_counter: &mut usize,
+    ) {
+        let mut check_op = |op: &Operand| {
+            if let Operand::Constant(IrConstant::String(ref s)) = op {
+                if !string_constants.contains_key(s) {
+                    let name = format!("@.str.{}", str_counter);
+                    *str_counter += 1;
+                    string_constants.insert(s.clone(), name);
+                }
+            }
+        };
+
+        match inst {
+            IrInstruction::Store { src, .. } => check_op(src),
+            IrInstruction::Call { args, .. } => {
+                for arg in args {
+                    check_op(arg);
+                }
+            }
+            IrInstruction::BinaryOp { left, right, .. } => {
+                check_op(left);
+                check_op(right);
+            }
+            IrInstruction::Compare { left, right, .. } => {
+                check_op(left);
+                check_op(right);
+            }
+            IrInstruction::Return { value: Some(op) } => check_op(op),
+            IrInstruction::DebugPrint { args } => {
+                for arg in args {
+                    check_op(arg);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn emit_function(
+        &self,
+        func: &IrFunction,
+        string_constants: &HashMap<String, String>,
+    ) -> String {
         let mut out = String::new();
 
         let ret_llvm_ty = func
@@ -191,6 +259,7 @@ impl LlvmEmitter {
                     &mut out,
                     &mut local_types,
                     &mut temp_types,
+                    string_constants,
                     &func.return_type,
                 );
             }
@@ -220,6 +289,7 @@ impl LlvmEmitter {
         out: &mut String,
         local_types: &mut HashMap<String, (String, usize)>,
         temp_types: &mut HashMap<usize, String>,
+        string_constants: &HashMap<String, String>,
         func_ret_type: &Option<VbType>,
     ) {
         match inst {
@@ -236,7 +306,7 @@ impl LlvmEmitter {
                 ));
             }
             IrInstruction::Load { dest, src } => {
-                let (src_val, src_ty) = self.format_operand(src, local_types, temp_types);
+                let (src_val, src_ty) = self.format_operand(src, local_types, temp_types, string_constants);
                 temp_types.insert(*dest, src_ty.clone());
                 // If src was a local variable, load from its alloca pointer
                 if let Operand::Local(ref name) = src {
@@ -245,12 +315,11 @@ impl LlvmEmitter {
                         dest, src_ty, name
                     ));
                 } else {
-                    // Direct copy
                     out.push_str(&format!("  %t{} = add {} {}, 0\n", dest, src_ty, src_val));
                 }
             }
             IrInstruction::Store { dest, src } => {
-                let (src_val, src_ty) = self.format_operand(src, local_types, temp_types);
+                let (src_val, src_ty) = self.format_operand(src, local_types, temp_types, string_constants);
                 if let Operand::Local(ref name) = dest {
                     out.push_str(&format!(
                         "  store {} {}, ptr %\"local_{}\"\n",
@@ -265,8 +334,8 @@ impl LlvmEmitter {
                 right,
                 result_type,
             } => {
-                let (left_val, left_ty) = self.format_operand(left, local_types, temp_types);
-                let (right_val, _) = self.format_operand(right, local_types, temp_types);
+                let (left_val, left_ty) = self.format_operand(left, local_types, temp_types, string_constants);
+                let (right_val, _) = self.format_operand(right, local_types, temp_types, string_constants);
                 let res_llvm_ty = Self::llvm_type(result_type);
                 temp_types.insert(*dest, res_llvm_ty.to_string());
 
@@ -295,7 +364,7 @@ impl LlvmEmitter {
                 operand,
                 result_type,
             } => {
-                let (op_val, op_ty) = self.format_operand(operand, local_types, temp_types);
+                let (op_val, op_ty) = self.format_operand(operand, local_types, temp_types, string_constants);
                 let res_llvm_ty = Self::llvm_type(result_type);
                 temp_types.insert(*dest, res_llvm_ty.to_string());
 
@@ -318,8 +387,8 @@ impl LlvmEmitter {
                 left,
                 right,
             } => {
-                let (left_val, left_ty) = self.format_operand(left, local_types, temp_types);
-                let (right_val, _) = self.format_operand(right, local_types, temp_types);
+                let (left_val, left_ty) = self.format_operand(left, local_types, temp_types, string_constants);
+                let (right_val, _) = self.format_operand(right, local_types, temp_types, string_constants);
                 temp_types.insert(*dest, "i16".to_string());
 
                 let cmp_op = match op {
@@ -332,7 +401,6 @@ impl LlvmEmitter {
                     _ => "eq",
                 };
 
-                // Compare generates i1, then we extend to VB6 Boolean (True = -1, False = 0)
                 out.push_str(&format!(
                     "  %cmp{} = icmp {} {} {}, {}\n",
                     dest, cmp_op, left_ty, left_val, right_val
@@ -350,7 +418,7 @@ impl LlvmEmitter {
                 true_target,
                 false_target,
             } => {
-                let (cond_val, cond_ty) = self.format_operand(condition, local_types, temp_types);
+                let (cond_val, cond_ty) = self.format_operand(condition, local_types, temp_types, string_constants);
                 out.push_str(&format!(
                     "  %cond_bool_{} = icmp ne {} {}, 0\n",
                     true_target, cond_ty, cond_val
@@ -361,10 +429,47 @@ impl LlvmEmitter {
                 ));
             }
             IrInstruction::Call { dest, name, args } => {
+                if name.eq_ignore_ascii_case("MsgBox") {
+                    let prompt_str = if let Some(arg0) = args.get(0) {
+                        let (val, _) = self.format_operand(arg0, local_types, temp_types, string_constants);
+                        val
+                    } else {
+                        "null".to_string()
+                    };
+
+                    let title_str = if let Some(arg1) = args.get(1) {
+                        let (val, _) = self.format_operand(arg1, local_types, temp_types, string_constants);
+                        val
+                    } else {
+                        "null".to_string()
+                    };
+
+                    let buttons_str = if let Some(arg2) = args.get(2) {
+                        let (val, _) = self.format_operand(arg2, local_types, temp_types, string_constants);
+                        val
+                    } else {
+                        "0".to_string()
+                    };
+
+                    if let Some(dest_id) = dest {
+                        temp_types.insert(*dest_id, "i32".to_string());
+                        out.push_str(&format!(
+                            "  %t{} = call i32 @vb6_msgbox(ptr {}, ptr {}, i32 {})\n",
+                            dest_id, prompt_str, title_str, buttons_str
+                        ));
+                    } else {
+                        out.push_str(&format!(
+                            "  call i32 @vb6_msgbox(ptr {}, ptr {}, i32 {})\n",
+                            prompt_str, title_str, buttons_str
+                        ));
+                    }
+                    return;
+                }
+
                 let args_formatted: Vec<String> = args
                     .iter()
                     .map(|arg| {
-                        let (val, ty) = self.format_operand(arg, local_types, temp_types);
+                        let (val, ty) = self.format_operand(arg, local_types, temp_types, string_constants);
                         format!("{} {}", ty, val)
                     })
                     .collect();
@@ -387,7 +492,7 @@ impl LlvmEmitter {
             }
             IrInstruction::Return { value } => {
                 if let Some(val_op) = value {
-                    let (v_str, v_ty) = self.format_operand(val_op, local_types, temp_types);
+                    let (v_str, v_ty) = self.format_operand(val_op, local_types, temp_types, string_constants);
                     out.push_str(&format!("  ret {} {}\n", v_ty, v_str));
                 } else if let Some(ref ret_ty) = func_ret_type {
                     let def_val = Self::llvm_default_val(ret_ty);
@@ -406,7 +511,7 @@ impl LlvmEmitter {
                 from_type,
                 to_type,
             } => {
-                let (src_val, _) = self.format_operand(src, local_types, temp_types);
+                let (src_val, _) = self.format_operand(src, local_types, temp_types, string_constants);
                 let to_llvm_ty = Self::llvm_type(to_type);
                 temp_types.insert(*dest, to_llvm_ty.to_string());
 
@@ -467,10 +572,10 @@ impl LlvmEmitter {
             }
             IrInstruction::DebugPrint { args } => {
                 for arg in args {
-                    let (arg_val, arg_ty) = self.format_operand(arg, local_types, temp_types);
+                    let (arg_val, _) = self.format_operand(arg, local_types, temp_types, string_constants);
                     out.push_str(&format!(
-                        "  call void @vb6_debug_print({} {})\n",
-                        arg_ty, arg_val
+                        "  call void @vb6_debug_print(ptr {})\n",
+                        arg_val
                     ));
                 }
             }
@@ -483,6 +588,7 @@ impl LlvmEmitter {
         op: &Operand,
         local_types: &HashMap<String, (String, usize)>,
         temp_types: &HashMap<usize, String>,
+        string_constants: &HashMap<String, String>,
     ) -> (String, String) {
         match op {
             Operand::Temp(id) => {
@@ -502,7 +608,13 @@ impl LlvmEmitter {
             Operand::Constant(c) => match c {
                 IrConstant::Int(v, ty) => (v.to_string(), Self::llvm_type(ty).to_string()),
                 IrConstant::Float(v) => (format!("{:.6}", v), "double".to_string()),
-                IrConstant::String(_) => ("null".to_string(), "ptr".to_string()),
+                IrConstant::String(s) => {
+                    if let Some(global_name) = string_constants.get(s) {
+                        (global_name.clone(), "ptr".to_string())
+                    } else {
+                        ("null".to_string(), "ptr".to_string())
+                    }
+                }
                 IrConstant::Bool(b) => {
                     let val = if *b { "-1" } else { "0" };
                     (val.to_string(), "i16".to_string())
@@ -528,4 +640,20 @@ fn block_ends_with_terminator(block: &BasicBlock) -> bool {
     } else {
         false
     }
+}
+
+fn escape_llvm_string(s: &str) -> (String, usize) {
+    let mut out = String::from("c\"");
+    let mut len = 0;
+    for b in s.bytes() {
+        len += 1;
+        if b >= 32 && b <= 126 && b != b'\\' && b != b'"' {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("\\{:02X}", b));
+        }
+    }
+    out.push_str("\\00\"");
+    len += 1;
+    (out, len)
 }

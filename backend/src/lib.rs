@@ -65,8 +65,12 @@ impl Backend {
 
     /// Compile IrModule to object bytes in memory.
     pub fn compile_module(&self, module: &IrModule) -> Result<Vec<u8>, BackendError> {
+        let count = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
         let temp_dir = std::env::temp_dir();
-        let temp_obj = temp_dir.join(format!("vb6_tmp_{}.obj", std::process::id()));
+        let temp_obj = temp_dir.join(format!("vb6_tmp_{}_{}.obj", std::process::id(), count));
         self.compile_to_object(module, &temp_obj, false)?;
         let bytes = std::fs::read(&temp_obj)?;
         let _ = std::fs::remove_file(&temp_obj);

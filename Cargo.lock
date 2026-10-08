@@ -414,6 +414,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "thiserror",
+ "vb6-runtime",
 ]
 
 [[package]]
