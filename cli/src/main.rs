@@ -54,11 +54,13 @@ fn main() -> anyhow::Result<()> {
         "vbp" => {
             println!("Loading VB6 Project...");
             let project = VbProject::load_from_file(&args.input)?;
-            println!("Project Name: {}", project.name);
-            println!("Startup: {}", project.startup);
+            println!("Project Name: {}", project.settings.name);
+            println!("Startup: {}", project.settings.startup);
             println!("Modules count: {}", project.modules.len());
             println!("Classes count: {}", project.classes.len());
             println!("Forms count: {}", project.forms.len());
+            println!("References count: {}", project.references.len());
+            println!("Components count: {}", project.components.len());
         }
         "bas" | "frm" | "cls" => {
             let content = std::fs::read_to_string(&args.input)?;

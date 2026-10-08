@@ -13,15 +13,13 @@ fn test_golden_001_hello_project_and_ast() {
 
     let project_dir = project_path.parent().unwrap().to_path_buf();
     let project = VbProject::load_from_file(&project_path).expect("Failed to load golden .vbp");
-    assert_eq!(project.name, "HelloVB6");
-    assert_eq!(project.startup, "Sub Main");
+    assert_eq!(project.settings.name, "HelloVB6");
+    assert_eq!(project.settings.startup, "Sub Main");
     assert_eq!(project.modules.len(), 1);
 
-    let module_path = &project.modules[0];
-    assert!(module_path.exists(), "Module file {:?} does not exist", module_path);
-
-    let code = std::fs::read_to_string(module_path).expect("Failed to read module source");
-    let ast = parse_source(&code).expect("Failed to parse module source");
+    let module = &project.modules[0];
+    let code = &module.code;
+    let ast = parse_source(code).expect("Failed to parse module source");
 
     assert_eq!(ast.declarations.len(), 1);
     match &ast.declarations[0] {

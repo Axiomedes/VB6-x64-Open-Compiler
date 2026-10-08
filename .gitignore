@@ -10,6 +10,7 @@ obj/
 *.pdb
 *.ilk
 *.obj
+*.vbw
 
 # Editor & OS files
 .vscode/
