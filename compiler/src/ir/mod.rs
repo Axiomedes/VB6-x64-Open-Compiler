@@ -1,39 +1,18 @@
 //! VB6 Intermediate Representation (IR).
 //! Decoupled from LLVM, providing an explicit, typed three-address code representation.
 
-use serde::{Deserialize, Serialize};
+pub mod lowering;
+pub mod model;
+pub mod printer;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum IrOpcode {
-    Load,
-    Store,
-    Add,
-    Sub,
-    Mul,
-    Div,
-    Call,
-    Return,
-    Branch,
-    Compare,
-    Alloc,
-    StringConcat,
-    VariantConvert,
-    ObjectInvoke,
-    PropertyGet,
-    PropertyLet,
-    PropertySet,
-    EventHandler,
-    ErrorHandler,
-}
+pub use lowering::AstToIrLowering;
+pub use model::*;
+pub use printer::IrPrinter;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct IrInstruction {
-    pub opcode: IrOpcode,
-    pub operands: Vec<String>,
-}
+use crate::ast::SourceFile;
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct IrModule {
-    pub name: String,
-    pub instructions: Vec<IrInstruction>,
+/// Compile a parsed SourceFile into a typed VB6 IrModule.
+pub fn compile_to_ir(source: &SourceFile, module_name: &str) -> IrModule {
+    let mut lowering = AstToIrLowering::new();
+    lowering.lower_source_file(source, module_name)
 }
