@@ -11,9 +11,18 @@ pub struct IrModule {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IrParam {
+    pub name: String,
+    pub vb_type: VbType,
+    pub is_by_val: bool,
+    pub is_optional: bool,
+    pub is_param_array: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IrFunction {
     pub name: String,
-    pub params: Vec<(String, VbType)>,
+    pub params: Vec<IrParam>,
     pub return_type: Option<VbType>,
     pub blocks: Vec<BasicBlock>,
 }
@@ -158,6 +167,13 @@ pub enum IrInstruction {
         dest: usize,
         src: Operand,
         target_type: VbType,
+    },
+    /// General type coercion: `%dest = COERCE %src, from_type -> to_type`
+    Coerce {
+        dest: usize,
+        src: Operand,
+        from_type: VbType,
+        to_type: VbType,
     },
     /// On Error GoTo handler registration
     PushErrorHandler {

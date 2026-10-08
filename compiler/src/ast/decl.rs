@@ -68,6 +68,7 @@ pub struct Parameter {
     pub is_by_val: bool,
     pub param_type: Option<TypeSpec>,
     pub is_optional: bool,
+    pub is_param_array: bool,
     pub default_value: Option<crate::ast::expr::Expression>,
 }
 

@@ -23,6 +23,44 @@ pub enum ProcKind {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct ParameterInfo {
+    pub name: String,
+    pub vb_type: VbType,
+    pub is_by_val: bool,
+    pub is_optional: bool,
+    pub is_param_array: bool,
+    pub has_default: bool,
+}
+
+impl ParameterInfo {
+    pub fn new(name: impl Into<String>, vb_type: VbType) -> Self {
+        Self {
+            name: name.into(),
+            vb_type,
+            is_by_val: false,
+            is_optional: false,
+            is_param_array: false,
+            has_default: false,
+        }
+    }
+
+    pub fn by_val(mut self) -> Self {
+        self.is_by_val = true;
+        self
+    }
+
+    pub fn optional(mut self) -> Self {
+        self.is_optional = true;
+        self
+    }
+
+    pub fn param_array(mut self) -> Self {
+        self.is_param_array = true;
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum SymbolKind {
     Variable {
         is_const: bool,
@@ -31,10 +69,11 @@ pub enum SymbolKind {
     Parameter {
         is_by_val: bool,
         is_optional: bool,
+        is_param_array: bool,
     },
     Procedure {
         kind: ProcKind,
-        params: Vec<(String, VbType)>,
+        params: Vec<ParameterInfo>,
         return_type: Option<VbType>,
     },
     Class,
@@ -93,7 +132,13 @@ impl SymbolTable {
             name: "MsgBox".to_string(),
             kind: SymbolKind::Procedure {
                 kind: ProcKind::Function,
-                params: vec![("Prompt".to_string(), VbType::Variant)],
+                params: vec![
+                    ParameterInfo::new("Prompt", VbType::Variant),
+                    ParameterInfo::new("Buttons", VbType::Long).optional(),
+                    ParameterInfo::new("Title", VbType::Variant).optional(),
+                    ParameterInfo::new("HelpFile", VbType::Variant).optional(),
+                    ParameterInfo::new("Context", VbType::Variant).optional(),
+                ],
                 return_type: Some(VbType::Integer),
             },
             vb_type: VbType::Integer,
@@ -103,6 +148,36 @@ impl SymbolTable {
         self.scopes[0]
             .symbols
             .insert("MSGBOX".to_string(), msgbox_symbol);
+
+        let doevents_symbol = Symbol {
+            name: "DoEvents".to_string(),
+            kind: SymbolKind::Procedure {
+                kind: ProcKind::Function,
+                params: Vec::new(),
+                return_type: Some(VbType::Long),
+            },
+            vb_type: VbType::Long,
+            visibility: Visibility::Public,
+            span: Span::default(),
+        };
+        self.scopes[0]
+            .symbols
+            .insert("DOEVENTS".to_string(), doevents_symbol);
+
+        let len_symbol = Symbol {
+            name: "Len".to_string(),
+            kind: SymbolKind::Procedure {
+                kind: ProcKind::Function,
+                params: vec![ParameterInfo::new("Expression", VbType::Variant)],
+                return_type: Some(VbType::Long),
+            },
+            vb_type: VbType::Long,
+            visibility: Visibility::Public,
+            span: Span::default(),
+        };
+        self.scopes[0]
+            .symbols
+            .insert("LEN".to_string(), len_symbol);
     }
 
     pub fn enter_scope(&mut self, kind: ScopeKind) -> usize {

@@ -6,7 +6,7 @@ use crate::ast::span::Span;
 use crate::ast::stmt::*;
 use crate::ast::SourceFile;
 use crate::symbols::*;
-use crate::types::VbType;
+use crate::types::*;
 use thiserror::Error;
 
 #[derive(Debug, Clone, Error, PartialEq)]
@@ -34,6 +34,36 @@ pub enum SemanticError {
     },
     #[error("Invalid assignment target at line {}, col {}", span.start_line, span.start_col)]
     InvalidAssignmentTarget { span: Span },
+    #[error("Overflow: value '{value}' is out of range for type '{target_type:?}' at line {}, col {}", span.start_line, span.start_col)]
+    Overflow {
+        value: String,
+        target_type: VbType,
+        span: Span,
+    },
+    #[error("Optional parameter '{param_name}' must be followed by optional parameter or ParamArray at line {}, col {}", span.start_line, span.start_col)]
+    OptionalParamMustFollowRequired {
+        param_name: String,
+        span: Span,
+    },
+    #[error("ParamArray parameter must be the last parameter in the list at line {}, col {}", span.start_line, span.start_col)]
+    ParamArrayMustBeLast {
+        span: Span,
+    },
+    #[error("ParamArray parameter cannot be passed ByVal at line {}, col {}", span.start_line, span.start_col)]
+    ParamArrayCannotBeByVal {
+        span: Span,
+    },
+    #[error("ParamArray parameter cannot be Optional at line {}, col {}", span.start_line, span.start_col)]
+    ParamArrayCannotBeOptional {
+        span: Span,
+    },
+    #[error("ByRef type mismatch for argument '{param_name}': expected variable of type '{expected:?}', found '{found:?}' at line {}, col {}", span.start_line, span.start_col)]
+    ByRefTypeMismatch {
+        param_name: String,
+        expected: VbType,
+        found: VbType,
+        span: Span,
+    },
 }
 
 pub struct SemanticAnalyzer {
@@ -79,22 +109,65 @@ impl SemanticAnalyzer {
         }
     }
 
+    fn validate_and_convert_parameters(
+        &mut self,
+        params: &[Parameter],
+        proc_span: Span,
+    ) -> Vec<ParameterInfo> {
+        let mut param_infos = Vec::new();
+        let mut seen_optional = false;
+
+        for (idx, p) in params.iter().enumerate() {
+            let is_last = idx == params.len() - 1;
+
+            if p.is_param_array {
+                if !is_last {
+                    self.errors
+                        .push(SemanticError::ParamArrayMustBeLast { span: proc_span });
+                }
+                if p.is_by_val {
+                    self.errors
+                        .push(SemanticError::ParamArrayCannotBeByVal { span: proc_span });
+                }
+                if p.is_optional {
+                    self.errors
+                        .push(SemanticError::ParamArrayCannotBeOptional { span: proc_span });
+                }
+            }
+
+            if p.is_optional {
+                seen_optional = true;
+            } else if seen_optional && !p.is_param_array {
+                self.errors
+                    .push(SemanticError::OptionalParamMustFollowRequired {
+                        param_name: p.name.clone(),
+                        span: proc_span,
+                    });
+            }
+
+            let ty = p
+                .param_type
+                .as_ref()
+                .map(|t| VbType::from_name(&t.name))
+                .unwrap_or(VbType::Variant);
+
+            param_infos.push(ParameterInfo {
+                name: p.name.clone(),
+                vb_type: ty,
+                is_by_val: p.is_by_val,
+                is_optional: p.is_optional,
+                is_param_array: p.is_param_array,
+                has_default: p.default_value.is_some(),
+            });
+        }
+
+        param_infos
+    }
+
     fn declare_symbol(&mut self, decl: &Declaration) {
         match decl {
             Declaration::Sub(s) => {
-                let params = s
-                    .params
-                    .iter()
-                    .map(|p| {
-                        let ty = p
-                            .param_type
-                            .as_ref()
-                            .map(|t| VbType::from_name(&t.name))
-                            .unwrap_or(VbType::Variant);
-                        (p.name.clone(), ty)
-                    })
-                    .collect();
-
+                let params = self.validate_and_convert_parameters(&s.params, s.span);
                 let sym = Symbol {
                     name: s.name.clone(),
                     kind: SymbolKind::Procedure {
@@ -115,19 +188,7 @@ impl SemanticAnalyzer {
                 }
             }
             Declaration::Function(f) => {
-                let params = f
-                    .params
-                    .iter()
-                    .map(|p| {
-                        let ty = p
-                            .param_type
-                            .as_ref()
-                            .map(|t| VbType::from_name(&t.name))
-                            .unwrap_or(VbType::Variant);
-                        (p.name.clone(), ty)
-                    })
-                    .collect();
-
+                let params = self.validate_and_convert_parameters(&f.params, f.span);
                 let ret_ty = f
                     .return_type
                     .as_ref()
@@ -180,6 +241,53 @@ impl SemanticAnalyzer {
                     }
                 }
             }
+            Declaration::Type(t) => {
+                let raw_members: Vec<(String, VbType)> = t
+                    .members
+                    .iter()
+                    .map(|m| (m.name.clone(), VbType::from_name(&m.type_spec.name)))
+                    .collect();
+                let _layout = crate::types::UdtLayout::compute(&t.name, &raw_members, true);
+                let sym = Symbol {
+                    name: t.name.clone(),
+                    kind: SymbolKind::UserDefinedType,
+                    vb_type: VbType::UserDefined(t.name.clone()),
+                    visibility: t.visibility,
+                    span: t.span,
+                };
+                let _ = self.symbol_table.define(sym);
+            }
+            Declaration::Enum(e) => {
+                let raw_members: Vec<(String, Option<i32>)> = e
+                    .members
+                    .iter()
+                    .map(|m| (m.name.clone(), m.value))
+                    .collect();
+                let enum_def = crate::types::EnumDefinition::new(&e.name, &raw_members);
+                let sym = Symbol {
+                    name: e.name.clone(),
+                    kind: SymbolKind::Enum,
+                    vb_type: VbType::Enum(e.name.clone()),
+                    visibility: e.visibility,
+                    span: e.span,
+                };
+                let _ = self.symbol_table.define(sym);
+
+                // Register enum members as Long constants in scope
+                for m in &enum_def.members {
+                    let member_sym = Symbol {
+                        name: m.name.clone(),
+                        kind: SymbolKind::Variable {
+                            is_const: true,
+                            is_static: false,
+                        },
+                        vb_type: VbType::Long,
+                        visibility: e.visibility,
+                        span: e.span,
+                    };
+                    let _ = self.symbol_table.define(member_sym);
+                }
+            }
             _ => {}
         }
     }
@@ -200,6 +308,7 @@ impl SemanticAnalyzer {
                         kind: SymbolKind::Parameter {
                             is_by_val: p.is_by_val,
                             is_optional: p.is_optional,
+                            is_param_array: p.is_param_array,
                         },
                         vb_type,
                         visibility: Visibility::Default,
@@ -226,6 +335,7 @@ impl SemanticAnalyzer {
                         kind: SymbolKind::Parameter {
                             is_by_val: p.is_by_val,
                             is_optional: p.is_optional,
+                            is_param_array: p.is_param_array,
                         },
                         vb_type,
                         visibility: Visibility::Default,
@@ -299,6 +409,17 @@ impl SemanticAnalyzer {
                 let target_ty = self.infer_expression_type(target);
                 let value_ty = self.infer_expression_type(value);
 
+                // Check integer literal overflow
+                if let Expression::Literal(Literal::Integer(i)) = value {
+                    if target_ty.is_integer() && !target_ty.can_hold_integer(*i as i64) {
+                        self.errors.push(SemanticError::Overflow {
+                            value: i.to_string(),
+                            target_type: target_ty.clone(),
+                            span: *span,
+                        });
+                    }
+                }
+
                 if target_ty != VbType::Unknown
                     && value_ty != VbType::Unknown
                     && !value_ty.can_coerce_to(&target_ty)
@@ -360,23 +481,46 @@ impl SemanticAnalyzer {
                     self.analyze_statement(s);
                 }
             }
+            Statement::DoLoop {
+                condition, body, ..
+            } => {
+                if let Some(cond) = condition {
+                    match cond {
+                        LoopCondition::While(e) | LoopCondition::Until(e) => {
+                            let _ = self.infer_expression_type(e);
+                        }
+                    }
+                }
+                for s in body {
+                    self.analyze_statement(s);
+                }
+            }
+            Statement::WhileWend {
+                condition, body, ..
+            } => {
+                let _ = self.infer_expression_type(condition);
+                for s in body {
+                    self.analyze_statement(s);
+                }
+            }
             Statement::Call {
                 name,
                 arguments,
                 span,
                 ..
             } => {
-                if let Some(sym) = self.symbol_table.lookup(name) {
+                let proc_params = if let Some(sym) = self.symbol_table.lookup(name) {
                     if let SymbolKind::Procedure { params, .. } = &sym.kind {
-                        if arguments.len() != params.len() {
-                            self.errors.push(SemanticError::ArgumentCountMismatch {
-                                proc_name: name.clone(),
-                                expected: params.len(),
-                                found: arguments.len(),
-                                span: *span,
-                            });
-                        }
+                        Some(params.clone())
+                    } else {
+                        None
                     }
+                } else {
+                    None
+                };
+
+                if let Some(params) = proc_params {
+                    self.validate_procedure_call(name, &params, arguments, *span);
                 } else if self.option_explicit {
                     self.errors.push(SemanticError::UndeclaredIdentifier {
                         name: name.clone(),
@@ -397,6 +541,70 @@ impl SemanticAnalyzer {
         }
     }
 
+    fn validate_procedure_call(
+        &mut self,
+        proc_name: &str,
+        params: &[ParameterInfo],
+        arguments: &[Expression],
+        span: Span,
+    ) {
+        let has_param_array = params.last().map(|p| p.is_param_array).unwrap_or(false);
+        let min_args = params
+            .iter()
+            .filter(|p| !p.is_optional && !p.is_param_array)
+            .count();
+        let max_args = if has_param_array {
+            usize::MAX
+        } else {
+            params.len()
+        };
+
+        if arguments.len() < min_args || arguments.len() > max_args {
+            self.errors.push(SemanticError::ArgumentCountMismatch {
+                proc_name: proc_name.to_string(),
+                expected: min_args,
+                found: arguments.len(),
+                span,
+            });
+            return;
+        }
+
+        for (idx, arg) in arguments.iter().enumerate() {
+            let param = if idx < params.len() {
+                &params[idx]
+            } else if has_param_array {
+                params.last().unwrap()
+            } else {
+                break;
+            };
+
+            let arg_ty = self.infer_expression_type(arg);
+
+            if !arg_ty.can_coerce_to(&param.vb_type) && arg_ty != VbType::Unknown {
+                self.errors.push(SemanticError::TypeMismatch {
+                    expected: param.vb_type.clone(),
+                    found: arg_ty,
+                    span,
+                });
+            } else if !param.is_by_val && !param.is_param_array {
+                // If a variable is passed ByRef, its type must match the parameter type in VB6
+                if let Expression::Variable(_) = arg {
+                    if arg_ty != param.vb_type
+                        && param.vb_type != VbType::Variant
+                        && arg_ty != VbType::Variant
+                    {
+                        self.errors.push(SemanticError::ByRefTypeMismatch {
+                            param_name: param.name.clone(),
+                            expected: param.vb_type.clone(),
+                            found: arg_ty,
+                            span,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
     pub fn infer_expression_type(&mut self, expr: &Expression) -> VbType {
         match expr {
             Expression::Literal(lit) => match lit {
@@ -411,77 +619,75 @@ impl SemanticAnalyzer {
             Expression::Variable(name) => {
                 if let Some(sym) = self.symbol_table.lookup(name) {
                     sym.vb_type.clone()
+                } else if self.option_explicit {
+                    self.errors.push(SemanticError::UndeclaredIdentifier {
+                        name: name.clone(),
+                        span: Span::default(),
+                    });
+                    VbType::Unknown
                 } else {
-                    if self.option_explicit {
-                        self.errors.push(SemanticError::UndeclaredIdentifier {
-                            name: name.clone(),
-                            span: Span::default(),
-                        });
-                        VbType::Unknown
-                    } else {
-                        // In classic VB6 without Option Explicit, undeclared variables default to Variant!
-                        VbType::Variant
-                    }
+                    // Undeclared variable in VB6 without Option Explicit is Variant
+                    VbType::Variant
                 }
+            }
+            Expression::IndexAccess { target, indices } => {
+                let proc_info = if let Expression::Variable(name) = &**target {
+                    if let Some(sym) = self.symbol_table.lookup(name) {
+                        match &sym.kind {
+                            SymbolKind::Procedure {
+                                params,
+                                return_type,
+                                ..
+                            } => Some((name.clone(), params.clone(), return_type.clone())),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                if let Some((proc_name, params, return_type)) = proc_info {
+                    self.validate_procedure_call(
+                        &proc_name,
+                        &params,
+                        indices,
+                        Span::default(),
+                    );
+                    return return_type.unwrap_or(VbType::Variant);
+                }
+
+                let array_elem = if let Expression::Variable(name) = &**target {
+                    if let Some(sym) = self.symbol_table.lookup(name) {
+                        if let VbType::Array(elem) = &sym.vb_type {
+                            Some(*elem.clone())
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                for idx in indices {
+                    let _ = self.infer_expression_type(idx);
+                }
+
+                if let Some(elem) = array_elem {
+                    return elem;
+                }
+
+                VbType::Variant
             }
             Expression::BinaryOp { op, left, right } => {
                 let left_ty = self.infer_expression_type(left);
                 let right_ty = self.infer_expression_type(right);
 
-                match op {
-                    BinaryOperator::Concat => VbType::String,
-                    BinaryOperator::Equal
-                    | BinaryOperator::NotEqual
-                    | BinaryOperator::LessThan
-                    | BinaryOperator::LessThanOrEqual
-                    | BinaryOperator::GreaterThan
-                    | BinaryOperator::GreaterThanOrEqual
-                    | BinaryOperator::Is
-                    | BinaryOperator::Like => VbType::Boolean,
-                    BinaryOperator::Divide => VbType::Double, // VB6 '/' always produces Double
-                    BinaryOperator::IntegerDivide => VbType::Long,
-                    BinaryOperator::Modulo => VbType::Long,
-                    BinaryOperator::Add => {
-                        if left_ty == VbType::String && right_ty == VbType::String {
-                            VbType::String
-                        } else if left_ty == VbType::Double || right_ty == VbType::Double {
-                            VbType::Double
-                        } else if left_ty == VbType::Single || right_ty == VbType::Single {
-                            VbType::Single
-                        } else if left_ty == VbType::Long || right_ty == VbType::Long {
-                            VbType::Long
-                        } else if left_ty.is_integer() && right_ty.is_integer() {
-                            VbType::Integer
-                        } else {
-                            VbType::Variant
-                        }
-                    }
-                    BinaryOperator::Subtract | BinaryOperator::Multiply => {
-                        if left_ty == VbType::Double || right_ty == VbType::Double {
-                            VbType::Double
-                        } else if left_ty == VbType::Single || right_ty == VbType::Single {
-                            VbType::Single
-                        } else if left_ty == VbType::Long || right_ty == VbType::Long {
-                            VbType::Long
-                        } else {
-                            VbType::Integer
-                        }
-                    }
-                    BinaryOperator::And
-                    | BinaryOperator::Or
-                    | BinaryOperator::Xor
-                    | BinaryOperator::Eqv
-                    | BinaryOperator::Imp => {
-                        if left_ty == VbType::Boolean && right_ty == VbType::Boolean {
-                            VbType::Boolean
-                        } else if left_ty.is_integer() && right_ty.is_integer() {
-                            VbType::Long
-                        } else {
-                            VbType::Variant
-                        }
-                    }
-                    BinaryOperator::Exponent => VbType::Double,
-                }
+                crate::types::promote_binary_operator(&left_ty, op, &right_ty)
+                    .unwrap_or(VbType::Variant)
             }
             Expression::UnaryOp { op, operand } => {
                 let ty = self.infer_expression_type(operand);
@@ -493,7 +699,14 @@ impl SemanticAnalyzer {
                             ty
                         }
                     }
-                    UnaryOperator::Negate | UnaryOperator::Plus => ty,
+                    UnaryOperator::Negate => {
+                        if ty == VbType::Byte {
+                            VbType::Integer
+                        } else {
+                            ty
+                        }
+                    }
+                    UnaryOperator::Plus => ty,
                 }
             }
             Expression::Paren(inner) => self.infer_expression_type(inner),

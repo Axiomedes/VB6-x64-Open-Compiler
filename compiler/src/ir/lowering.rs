@@ -103,7 +103,7 @@ impl AstToIrLowering {
         let entry_idx = self.create_block("entry");
         self.switch_to_block(entry_idx);
 
-        let params: Vec<(String, VbType)> = sub
+        let params: Vec<IrParam> = sub
             .params
             .iter()
             .map(|p| {
@@ -112,17 +112,23 @@ impl AstToIrLowering {
                     .as_ref()
                     .map(|ts| VbType::from_name(&ts.name))
                     .unwrap_or(VbType::Variant);
-                (p.name.clone(), ty)
+                IrParam {
+                    name: p.name.clone(),
+                    vb_type: ty,
+                    is_by_val: p.is_by_val,
+                    is_optional: p.is_optional,
+                    is_param_array: p.is_param_array,
+                }
             })
             .collect();
 
         // Parameter copies into locals
-        for (name, ty) in &params {
+        for param in &params {
             let temp = self.next_temp();
             self.emit(IrInstruction::AllocLocal {
                 dest: temp,
-                name: name.clone(),
-                vb_type: ty.clone(),
+                name: param.name.clone(),
+                vb_type: param.vb_type.clone(),
             });
         }
 
@@ -161,7 +167,7 @@ impl AstToIrLowering {
         let entry_idx = self.create_block("entry");
         self.switch_to_block(entry_idx);
 
-        let params: Vec<(String, VbType)> = func
+        let params: Vec<IrParam> = func
             .params
             .iter()
             .map(|p| {
@@ -170,7 +176,13 @@ impl AstToIrLowering {
                     .as_ref()
                     .map(|ts| VbType::from_name(&ts.name))
                     .unwrap_or(VbType::Variant);
-                (p.name.clone(), ty)
+                IrParam {
+                    name: p.name.clone(),
+                    vb_type: ty,
+                    is_by_val: p.is_by_val,
+                    is_optional: p.is_optional,
+                    is_param_array: p.is_param_array,
+                }
             })
             .collect();
 
@@ -180,12 +192,12 @@ impl AstToIrLowering {
             .map(|ts| VbType::from_name(&ts.name))
             .unwrap_or(VbType::Variant);
 
-        for (name, ty) in &params {
+        for param in &params {
             let temp = self.next_temp();
             self.emit(IrInstruction::AllocLocal {
                 dest: temp,
-                name: name.clone(),
-                vb_type: ty.clone(),
+                name: param.name.clone(),
+                vb_type: param.vb_type.clone(),
             });
         }
 

@@ -35,7 +35,21 @@ impl IrPrinter {
         let params_str: Vec<String> = func
             .params
             .iter()
-            .map(|(name, ty)| format!("{}: {:?}", name, ty))
+            .map(|p| {
+                let mut prefix = String::new();
+                if p.is_optional {
+                    prefix.push_str("Optional ");
+                }
+                if p.is_by_val {
+                    prefix.push_str("ByVal ");
+                } else {
+                    prefix.push_str("ByRef ");
+                }
+                if p.is_param_array {
+                    prefix.push_str("ParamArray ");
+                }
+                format!("{}{}: {:?}", prefix, p.name, p.vb_type)
+            })
             .collect();
 
         out.push_str(&format!(
@@ -136,6 +150,18 @@ impl IrPrinter {
                     target_type
                 )
             }
+            IrInstruction::Coerce {
+                dest,
+                src,
+                from_type,
+                to_type,
+            } => format!(
+                "%{} = COERCE {}, {:?} -> {:?}",
+                dest,
+                Self::print_operand(src),
+                from_type,
+                to_type
+            ),
             IrInstruction::PushErrorHandler { target } => {
                 format!("PUSH_ERROR_HANDLER \"{}\"", target)
             }

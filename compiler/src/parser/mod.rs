@@ -350,13 +350,38 @@ impl Parser {
                     false // Default in VB6 is ByRef
                 };
 
+                let is_param_array = self.match_token(&TokenKind::ParamArray);
+
                 let name = self.expect_identifier("parameter name")?;
 
-                let param_type = if self.match_token(&TokenKind::As) {
+                // Check for array parentheses: e.g. Arr() or ParamArray Items()
+                let is_array_param = if self.match_token(&TokenKind::LParen) {
+                    self.expect(&TokenKind::RParen, "')' closing array parameter")?;
+                    true
+                } else {
+                    false
+                };
+
+                let mut param_type = if self.match_token(&TokenKind::As) {
                     Some(self.parse_type_spec()?)
                 } else {
                     None
                 };
+
+                if is_param_array || is_array_param {
+                    if let Some(ref mut pt) = param_type {
+                        if pt.array_dimensions.is_empty() {
+                            pt.array_dimensions.push(crate::ast::types::ArrayDimension { lower: None, upper: -1 });
+                        }
+                    } else if is_param_array {
+                        param_type = Some(TypeSpec {
+                            name: "Variant".to_string(),
+                            is_new: false,
+                            fixed_length: None,
+                            array_dimensions: vec![crate::ast::types::ArrayDimension { lower: None, upper: -1 }],
+                        });
+                    }
+                }
 
                 let default_value = if self.match_token(&TokenKind::Equals) {
                     Some(self.parse_expression()?)
@@ -369,6 +394,7 @@ impl Parser {
                     is_by_val,
                     param_type,
                     is_optional,
+                    is_param_array,
                     default_value,
                 });
 
