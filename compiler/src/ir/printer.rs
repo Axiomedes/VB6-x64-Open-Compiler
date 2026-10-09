@@ -9,8 +9,9 @@ impl IrPrinter {
         let mut out = String::new();
         out.push_str(&format!("module \"{}\"\n\n", module.name));
 
-        for (glob_name, glob_ty) in &module.globals {
-            out.push_str(&format!("global @{} : {:?}\n", glob_name, glob_ty));
+        for glob in &module.globals {
+            let vis = if glob.is_public { "public" } else { "private" };
+            out.push_str(&format!("global @{} : {:?} ({})\n", glob.name, glob.vb_type, vis));
         }
         if !module.globals.is_empty() {
             out.push('\n');
@@ -184,6 +185,7 @@ impl IrPrinter {
         match op {
             Operand::Temp(id) => format!("%{}", id),
             Operand::Local(name) => format!("Local(\"{}\")", name),
+            Operand::Global(name) => format!("Global(\"{}\")", name),
             Operand::Constant(c) => match c {
                 IrConstant::Int(v, ty) => format!("ConstInt({}, {:?})", v, ty),
                 IrConstant::Float(v) => format!("ConstFloat({})", v),

@@ -64,6 +64,10 @@ pub enum SemanticError {
         found: VbType,
         span: Span,
     },
+    #[error("Object required at line {}, col {}", span.start_line, span.start_col)]
+    ObjectRequired {
+        span: Span,
+    },
 }
 
 pub struct SemanticAnalyzer {
@@ -378,11 +382,13 @@ impl SemanticAnalyzer {
                         span: *span,
                     };
                     if let Err(orig) = self.symbol_table.define(sym) {
-                        self.errors.push(SemanticError::DuplicateSymbol {
-                            name: v.name.clone(),
-                            original_span: orig.span,
-                            duplicate_span: *span,
-                        });
+                        if *kind != VarDeclKind::ReDim && *kind != VarDeclKind::ReDimPreserve {
+                            self.errors.push(SemanticError::DuplicateSymbol {
+                                name: v.name.clone(),
+                                original_span: orig.span,
+                                duplicate_span: *span,
+                            });
+                        }
                     }
 
                     if let Some(init) = &v.init_value {
@@ -403,11 +409,28 @@ impl SemanticAnalyzer {
             Statement::Assignment {
                 target,
                 value,
+                is_set,
                 span,
-                ..
             } => {
                 let target_ty = self.infer_expression_type(target);
                 let value_ty = self.infer_expression_type(value);
+
+                if *is_set {
+                    if !target_ty.is_object_or_variant() && target_ty != VbType::Unknown {
+                        self.errors.push(SemanticError::ObjectRequired {
+                            span: *span,
+                        });
+                        return;
+                    }
+                    if !value_ty.is_object_or_variant() && value_ty != VbType::Unknown {
+                        self.errors.push(SemanticError::TypeMismatch {
+                            expected: VbType::Object,
+                            found: value_ty,
+                            span: *span,
+                        });
+                        return;
+                    }
+                }
 
                 // Check integer literal overflow
                 if let Expression::Literal(Literal::Integer(i)) = value {

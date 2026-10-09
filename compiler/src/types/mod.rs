@@ -142,6 +142,10 @@ impl VbType {
         matches!(self, VbType::Object | VbType::Array(_))
     }
 
+    pub fn is_object_or_variant(&self) -> bool {
+        matches!(self, VbType::Object | VbType::Variant | VbType::UserDefined(_))
+    }
+
     /// Return integer value bounds `(min, max)` for integer types.
     pub fn integer_bounds(&self) -> Option<(i64, i64)> {
         match self {

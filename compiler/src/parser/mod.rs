@@ -598,6 +598,18 @@ impl Parser {
         let mut vars = Vec::new();
         loop {
             let name = self.expect_identifier("variable name")?;
+            if self.match_token(&TokenKind::LParen) {
+                let mut paren_depth = 1;
+                while paren_depth > 0 && !self.is_at_end() {
+                    if self.match_token(&TokenKind::LParen) {
+                        paren_depth += 1;
+                    } else if self.match_token(&TokenKind::RParen) {
+                        paren_depth -= 1;
+                    } else {
+                        self.advance();
+                    }
+                }
+            }
             let type_spec = if self.match_token(&TokenKind::As) {
                 Some(self.parse_type_spec()?)
             } else {

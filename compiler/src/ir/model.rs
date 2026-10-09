@@ -4,9 +4,17 @@ use crate::types::VbType;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IrGlobal {
+    pub name: String,
+    pub vb_type: VbType,
+    pub is_public: bool,
+    pub initial_value: Option<IrConstant>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IrModule {
     pub name: String,
-    pub globals: Vec<(String, VbType)>,
+    pub globals: Vec<IrGlobal>,
     pub functions: Vec<IrFunction>,
 }
 
@@ -46,6 +54,7 @@ impl BasicBlock {
 pub enum Operand {
     Temp(usize),
     Local(String),
+    Global(String),
     Constant(IrConstant),
 }
 
