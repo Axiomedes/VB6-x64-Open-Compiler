@@ -99,6 +99,50 @@ impl LlvmEmitter {
             "vb6_str_from_bool" => Some(("ptr", &["i32"])),
             "vb6_string_equal" => Some(("i16", &["ptr", "ptr"])),
             "vb6_string_compare" => Some(("i32", &["ptr", "ptr"])),
+            "vb6_variant_init" => Some(("void", &["ptr"])),
+            "vb6_variant_clear" => Some(("void", &["ptr"])),
+            "vb6_variant_copy" => Some(("void", &["ptr", "ptr"])),
+            "vb6_variant_from_i8" => Some(("void", &["ptr", "i8"])),
+            "vb6_variant_from_i16" => Some(("void", &["ptr", "i16"])),
+            "vb6_variant_from_i32" => Some(("void", &["ptr", "i32"])),
+            "vb6_variant_from_i64" => Some(("void", &["ptr", "i64"])),
+            "vb6_variant_from_f32" => Some(("void", &["ptr", "float"])),
+            "vb6_variant_from_f64" => Some(("void", &["ptr", "double"])),
+            "vb6_variant_from_bool" => Some(("void", &["ptr", "i16"])),
+            "vb6_variant_from_str" => Some(("void", &["ptr", "ptr"])),
+            "vb6_variant_from_date" => Some(("void", &["ptr", "double"])),
+            "vb6_variant_from_empty" => Some(("void", &["ptr"])),
+            "vb6_variant_from_null" => Some(("void", &["ptr"])),
+            "vb6_variant_to_i8" => Some(("i8", &["ptr"])),
+            "vb6_variant_to_i16" => Some(("i16", &["ptr"])),
+            "vb6_variant_to_i32" => Some(("i32", &["ptr"])),
+            "vb6_variant_to_i64" => Some(("i64", &["ptr"])),
+            "vb6_variant_to_f32" => Some(("float", &["ptr"])),
+            "vb6_variant_to_f64" => Some(("double", &["ptr"])),
+            "vb6_variant_to_bool" => Some(("i16", &["ptr"])),
+            "vb6_variant_to_str" => Some(("ptr", &["ptr"])),
+            "vb6_variant_vartype" => Some(("i32", &["ptr"])),
+            "vb6_variant_typename" => Some(("ptr", &["ptr"])),
+            "vb6_variant_is_empty" => Some(("i16", &["ptr"])),
+            "vb6_variant_is_null" => Some(("i16", &["ptr"])),
+            "vb6_variant_is_numeric" => Some(("i16", &["ptr"])),
+            "vb6_variant_is_date" => Some(("i16", &["ptr"])),
+            "vb6_variant_is_array" => Some(("i16", &["ptr"])),
+            "vb6_variant_add" => Some(("void", &["ptr", "ptr", "ptr"])),
+            "vb6_variant_sub" => Some(("void", &["ptr", "ptr", "ptr"])),
+            "vb6_variant_mul" => Some(("void", &["ptr", "ptr", "ptr"])),
+            "vb6_variant_div" => Some(("void", &["ptr", "ptr", "ptr"])),
+            "vb6_variant_int_div" => Some(("void", &["ptr", "ptr", "ptr"])),
+            "vb6_variant_mod" => Some(("void", &["ptr", "ptr", "ptr"])),
+            "vb6_variant_concat" => Some(("void", &["ptr", "ptr", "ptr"])),
+            "vb6_variant_neg" => Some(("void", &["ptr", "ptr"])),
+            "vb6_variant_not" => Some(("void", &["ptr", "ptr"])),
+            "vb6_variant_and" => Some(("void", &["ptr", "ptr", "ptr"])),
+            "vb6_variant_or" => Some(("void", &["ptr", "ptr", "ptr"])),
+            "vb6_variant_xor" => Some(("void", &["ptr", "ptr", "ptr"])),
+            "vb6_variant_compare" => Some(("i32", &["ptr", "ptr"])),
+            "vb6_variant_equal" => Some(("i16", &["ptr", "ptr"])),
+            "vb6_debug_print_variant" => Some(("void", &["ptr"])),
             _ => None,
         }
     }
@@ -154,7 +198,51 @@ impl LlvmEmitter {
         out.push_str("declare ptr @vb6_str_from_f64(double)\n");
         out.push_str("declare ptr @vb6_str_from_bool(i32)\n");
         out.push_str("declare i16 @vb6_string_equal(ptr, ptr)\n");
-        out.push_str("declare i32 @vb6_string_compare(ptr, ptr)\n\n");
+        out.push_str("declare i32 @vb6_string_compare(ptr, ptr)\n");
+        out.push_str("declare void @vb6_variant_init(ptr)\n");
+        out.push_str("declare void @vb6_variant_clear(ptr)\n");
+        out.push_str("declare void @vb6_variant_copy(ptr, ptr)\n");
+        out.push_str("declare void @vb6_variant_from_i8(ptr, i8)\n");
+        out.push_str("declare void @vb6_variant_from_i16(ptr, i16)\n");
+        out.push_str("declare void @vb6_variant_from_i32(ptr, i32)\n");
+        out.push_str("declare void @vb6_variant_from_i64(ptr, i64)\n");
+        out.push_str("declare void @vb6_variant_from_f32(ptr, float)\n");
+        out.push_str("declare void @vb6_variant_from_f64(ptr, double)\n");
+        out.push_str("declare void @vb6_variant_from_bool(ptr, i16)\n");
+        out.push_str("declare void @vb6_variant_from_str(ptr, ptr)\n");
+        out.push_str("declare void @vb6_variant_from_date(ptr, double)\n");
+        out.push_str("declare void @vb6_variant_from_empty(ptr)\n");
+        out.push_str("declare void @vb6_variant_from_null(ptr)\n");
+        out.push_str("declare i8 @vb6_variant_to_i8(ptr)\n");
+        out.push_str("declare i16 @vb6_variant_to_i16(ptr)\n");
+        out.push_str("declare i32 @vb6_variant_to_i32(ptr)\n");
+        out.push_str("declare i64 @vb6_variant_to_i64(ptr)\n");
+        out.push_str("declare float @vb6_variant_to_f32(ptr)\n");
+        out.push_str("declare double @vb6_variant_to_f64(ptr)\n");
+        out.push_str("declare i16 @vb6_variant_to_bool(ptr)\n");
+        out.push_str("declare ptr @vb6_variant_to_str(ptr)\n");
+        out.push_str("declare i32 @vb6_variant_vartype(ptr)\n");
+        out.push_str("declare ptr @vb6_variant_typename(ptr)\n");
+        out.push_str("declare i16 @vb6_variant_is_empty(ptr)\n");
+        out.push_str("declare i16 @vb6_variant_is_null(ptr)\n");
+        out.push_str("declare i16 @vb6_variant_is_numeric(ptr)\n");
+        out.push_str("declare i16 @vb6_variant_is_date(ptr)\n");
+        out.push_str("declare i16 @vb6_variant_is_array(ptr)\n");
+        out.push_str("declare void @vb6_variant_add(ptr, ptr, ptr)\n");
+        out.push_str("declare void @vb6_variant_sub(ptr, ptr, ptr)\n");
+        out.push_str("declare void @vb6_variant_mul(ptr, ptr, ptr)\n");
+        out.push_str("declare void @vb6_variant_div(ptr, ptr, ptr)\n");
+        out.push_str("declare void @vb6_variant_int_div(ptr, ptr, ptr)\n");
+        out.push_str("declare void @vb6_variant_mod(ptr, ptr, ptr)\n");
+        out.push_str("declare void @vb6_variant_concat(ptr, ptr, ptr)\n");
+        out.push_str("declare void @vb6_variant_neg(ptr, ptr)\n");
+        out.push_str("declare void @vb6_variant_not(ptr, ptr)\n");
+        out.push_str("declare void @vb6_variant_and(ptr, ptr, ptr)\n");
+        out.push_str("declare void @vb6_variant_or(ptr, ptr, ptr)\n");
+        out.push_str("declare void @vb6_variant_xor(ptr, ptr, ptr)\n");
+        out.push_str("declare i32 @vb6_variant_compare(ptr, ptr)\n");
+        out.push_str("declare i16 @vb6_variant_equal(ptr, ptr)\n");
+        out.push_str("declare void @vb6_debug_print_variant(ptr)\n\n");
 
         // Module-level global and static variables
         let mut global_types: HashMap<String, String> = HashMap::new();
@@ -443,26 +531,63 @@ impl LlvmEmitter {
                         ));
                     }
                     _ => {
-                        out.push_str(&format!("  %t{} = add {} {}, 0\n", dest, src_ty, src_val));
+                        if src_ty == "[24 x i8]" {
+                            *branch_counter += 1;
+                            let c_id = *branch_counter;
+                            out.push_str(&format!("  %load_tmp_{} = alloca [24 x i8], align 8\n", c_id));
+                            out.push_str(&format!("  store [24 x i8] {}, ptr %load_tmp_{}\n", src_val, c_id));
+                            out.push_str(&format!("  %t{} = load [24 x i8], ptr %load_tmp_{}\n", dest, c_id));
+                        } else {
+                            out.push_str(&format!("  %t{} = add {} {}, 0\n", dest, src_ty, src_val));
+                        }
                     }
                 }
             }
             IrInstruction::Store { dest, src } => {
-                let (src_val, src_ty) = self.format_operand(src, local_types, global_types, temp_types, string_constants);
-                match dest {
-                    Operand::Local(ref name) => {
-                        out.push_str(&format!(
-                            "  store {} {}, ptr %\"local_{}\"\n",
-                            src_ty, src_val, name
-                        ));
+                let dest_is_variant = match dest {
+                    Operand::Local(ref name) => local_types.get(&name.to_ascii_uppercase()).map(|(t, _)| t == "[24 x i8]").unwrap_or(false),
+                    Operand::Global(ref name) => global_types.get(&name.to_ascii_uppercase()).map(|t| t == "[24 x i8]").unwrap_or(false),
+                    _ => false,
+                };
+                if dest_is_variant {
+                    let dest_ptr = match dest {
+                        Operand::Local(ref name) => format!("%\"local_{}\"", name),
+                        Operand::Global(ref name) => format!("@\"{}\"", name),
+                        _ => "".to_string(),
+                    };
+                    if matches!(src, Operand::Constant(IrConstant::Null)) {
+                        out.push_str(&format!("  call void @vb6_variant_from_null(ptr {})\n", dest_ptr));
+                    } else if matches!(src, Operand::Constant(IrConstant::Empty)) {
+                        out.push_str(&format!("  call void @vb6_variant_from_empty(ptr {})\n", dest_ptr));
+                    } else {
+                        let (src_val, src_ty) = self.format_operand(src, local_types, global_types, temp_types, string_constants);
+                        if src_ty == "[24 x i8]" {
+                            *branch_counter += 1;
+                            let c_id = *branch_counter;
+                            out.push_str(&format!("  %var_src_slot_{} = alloca [24 x i8], align 8\n", c_id));
+                            out.push_str(&format!("  store [24 x i8] {}, ptr %var_src_slot_{}\n", src_val, c_id));
+                            out.push_str(&format!("  call void @vb6_variant_copy(ptr {}, ptr %var_src_slot_{})\n", dest_ptr, c_id));
+                        } else {
+                            out.push_str(&format!("  store {} {}, ptr {}\n", src_ty, src_val, dest_ptr));
+                        }
                     }
-                    Operand::Global(ref name) => {
-                        out.push_str(&format!(
-                            "  store {} {}, ptr @\"{}\"\n",
-                            src_ty, src_val, name
-                        ));
+                } else {
+                    let (src_val, src_ty) = self.format_operand(src, local_types, global_types, temp_types, string_constants);
+                    match dest {
+                        Operand::Local(ref name) => {
+                            out.push_str(&format!(
+                                "  store {} {}, ptr %\"local_{}\"\n",
+                                src_ty, src_val, name
+                            ));
+                        }
+                        Operand::Global(ref name) => {
+                            out.push_str(&format!(
+                                "  store {} {}, ptr @\"{}\"\n",
+                                src_ty, src_val, name
+                            ));
+                        }
+                        _ => {}
                     }
-                    _ => {}
                 }
             }
             IrInstruction::BinaryOp {
@@ -473,28 +598,52 @@ impl LlvmEmitter {
                 result_type,
             } => {
                 let (left_val, left_ty) = self.format_operand(left, local_types, global_types, temp_types, string_constants);
-                let (right_val, _) = self.format_operand(right, local_types, global_types, temp_types, string_constants);
+                let (right_val, right_ty) = self.format_operand(right, local_types, global_types, temp_types, string_constants);
                 let res_llvm_ty = Self::llvm_type(result_type);
                 temp_types.insert(*dest, res_llvm_ty.to_string());
 
-                let is_float = result_type.is_floating();
-                let op_str = match op {
-                    IrBinaryOp::Add => if is_float { "fadd" } else { "add" },
-                    IrBinaryOp::Sub => if is_float { "fsub" } else { "sub" },
-                    IrBinaryOp::Mul => if is_float { "fmul" } else { "mul" },
-                    IrBinaryOp::Div => "fdiv",
-                    IrBinaryOp::IntDiv => "sdiv",
-                    IrBinaryOp::Mod => "srem",
-                    IrBinaryOp::BitAnd => "and",
-                    IrBinaryOp::BitOr => "or",
-                    IrBinaryOp::BitXor => "xor",
-                    _ => "add",
-                };
+                if result_type == &VbType::Variant {
+                    *branch_counter += 1;
+                    let c_id = *branch_counter;
+                    let (l_ptr, _) = cast_arg(&left_val, &left_ty, "ptr", out, branch_counter);
+                    let (r_ptr, _) = cast_arg(&right_val, &right_ty, "ptr", out, branch_counter);
+                    out.push_str(&format!("  %var_res_slot_{} = alloca [24 x i8], align 8\n", c_id));
+                    out.push_str(&format!("  call void @vb6_variant_init(ptr %var_res_slot_{})\n", c_id));
+                    let fn_name = match op {
+                        IrBinaryOp::Add => "vb6_variant_add",
+                        IrBinaryOp::Sub => "vb6_variant_sub",
+                        IrBinaryOp::Mul => "vb6_variant_mul",
+                        IrBinaryOp::Div => "vb6_variant_div",
+                        IrBinaryOp::IntDiv => "vb6_variant_int_div",
+                        IrBinaryOp::Mod => "vb6_variant_mod",
+                        IrBinaryOp::Concat => "vb6_variant_concat",
+                        IrBinaryOp::BitAnd => "vb6_variant_and",
+                        IrBinaryOp::BitOr => "vb6_variant_or",
+                        IrBinaryOp::BitXor => "vb6_variant_xor",
+                        _ => "vb6_variant_add",
+                    };
+                    out.push_str(&format!("  call void @{}(ptr %var_res_slot_{}, ptr {}, ptr {})\n", fn_name, c_id, l_ptr, r_ptr));
+                    out.push_str(&format!("  %t{} = load [24 x i8], ptr %var_res_slot_{}\n", dest, c_id));
+                } else {
+                    let is_float = result_type.is_floating();
+                    let op_str = match op {
+                        IrBinaryOp::Add => if is_float { "fadd" } else { "add" },
+                        IrBinaryOp::Sub => if is_float { "fsub" } else { "sub" },
+                        IrBinaryOp::Mul => if is_float { "fmul" } else { "mul" },
+                        IrBinaryOp::Div => "fdiv",
+                        IrBinaryOp::IntDiv => "sdiv",
+                        IrBinaryOp::Mod => "srem",
+                        IrBinaryOp::BitAnd => "and",
+                        IrBinaryOp::BitOr => "or",
+                        IrBinaryOp::BitXor => "xor",
+                        _ => "add",
+                    };
 
-                out.push_str(&format!(
-                    "  %t{} = {} {} {}, {}\n",
-                    dest, op_str, left_ty, left_val, right_val
-                ));
+                    out.push_str(&format!(
+                        "  %t{} = {} {} {}, {}\n",
+                        dest, op_str, left_ty, left_val, right_val
+                    ));
+                }
             }
             IrInstruction::UnaryOp {
                 dest,
@@ -506,16 +655,30 @@ impl LlvmEmitter {
                 let res_llvm_ty = Self::llvm_type(result_type);
                 temp_types.insert(*dest, res_llvm_ty.to_string());
 
-                match op {
-                    IrUnaryOp::Negate => {
-                        if result_type.is_floating() {
-                            out.push_str(&format!("  %t{} = fneg {} {}\n", dest, op_ty, op_val));
-                        } else {
-                            out.push_str(&format!("  %t{} = sub {} 0, {}\n", dest, op_ty, op_val));
+                if result_type == &VbType::Variant {
+                    *branch_counter += 1;
+                    let c_id = *branch_counter;
+                    let (op_ptr, _) = cast_arg(&op_val, &op_ty, "ptr", out, branch_counter);
+                    out.push_str(&format!("  %var_unary_res_{} = alloca [24 x i8], align 8\n", c_id));
+                    out.push_str(&format!("  call void @vb6_variant_init(ptr %var_unary_res_{})\n", c_id));
+                    let fn_name = match op {
+                        IrUnaryOp::Negate => "vb6_variant_neg",
+                        IrUnaryOp::BitNot => "vb6_variant_not",
+                    };
+                    out.push_str(&format!("  call void @{}(ptr %var_unary_res_{}, ptr {})\n", fn_name, c_id, op_ptr));
+                    out.push_str(&format!("  %t{} = load [24 x i8], ptr %var_unary_res_{}\n", dest, c_id));
+                } else {
+                    match op {
+                        IrUnaryOp::Negate => {
+                            if result_type.is_floating() {
+                                out.push_str(&format!("  %t{} = fneg {} {}\n", dest, op_ty, op_val));
+                            } else {
+                                out.push_str(&format!("  %t{} = sub {} 0, {}\n", dest, op_ty, op_val));
+                            }
                         }
-                    }
-                    IrUnaryOp::BitNot => {
-                        out.push_str(&format!("  %t{} = xor {} {}, -1\n", dest, op_ty, op_val));
+                        IrUnaryOp::BitNot => {
+                            out.push_str(&format!("  %t{} = xor {} {}, -1\n", dest, op_ty, op_val));
+                        }
                     }
                 }
             }
@@ -529,7 +692,33 @@ impl LlvmEmitter {
                 let (right_val, right_ty) = self.format_operand(right, local_types, global_types, temp_types, string_constants);
                 temp_types.insert(*dest, "i16".to_string());
 
-                if left_ty == "ptr" || right_ty == "ptr" {
+                if left_ty == "[24 x i8]" || right_ty == "[24 x i8]" {
+                    *branch_counter += 1;
+                    let c_id = *branch_counter;
+                    let (l_ptr, _) = cast_arg(&left_val, &left_ty, "ptr", out, branch_counter);
+                    let (r_ptr, _) = cast_arg(&right_val, &right_ty, "ptr", out, branch_counter);
+                    out.push_str(&format!(
+                        "  %var_cmp_{} = call i32 @vb6_variant_compare(ptr {}, ptr {})\n",
+                        c_id, l_ptr, r_ptr
+                    ));
+                    let cmp_op = match op {
+                        IrCompareOp::Equal => "eq",
+                        IrCompareOp::NotEqual => "ne",
+                        IrCompareOp::LessThan => "slt",
+                        IrCompareOp::LessThanOrEqual => "sle",
+                        IrCompareOp::GreaterThan => "sgt",
+                        IrCompareOp::GreaterThanOrEqual => "sge",
+                        _ => "eq",
+                    };
+                    out.push_str(&format!(
+                        "  %cmp{} = icmp {} i32 %var_cmp_{}, 0\n",
+                        dest, cmp_op, c_id
+                    ));
+                    out.push_str(&format!(
+                        "  %t{} = select i1 %cmp{}, i16 -1, i16 0\n",
+                        dest, dest
+                    ));
+                } else if left_ty == "ptr" || right_ty == "ptr" {
                     *branch_counter += 1;
                     let cmp_call_id = *branch_counter;
                     out.push_str(&format!(
@@ -729,7 +918,84 @@ impl LlvmEmitter {
                 let to_llvm_ty = Self::llvm_type(to_type);
                 temp_types.insert(*dest, to_llvm_ty.to_string());
 
-                if to_type == &VbType::String {
+                if to_type == &VbType::Variant {
+                    *branch_counter += 1;
+                    let c_id = *branch_counter;
+                    out.push_str(&format!("  %var_dest_slot_{} = alloca [24 x i8], align 8\n", c_id));
+                    out.push_str(&format!("  call void @vb6_variant_init(ptr %var_dest_slot_{})\n", c_id));
+                    match from_type {
+                        VbType::Byte => {
+                            out.push_str(&format!("  call void @vb6_variant_from_i8(ptr %var_dest_slot_{}, i8 {})\n", c_id, src_val));
+                        }
+                        VbType::Boolean => {
+                            out.push_str(&format!("  call void @vb6_variant_from_bool(ptr %var_dest_slot_{}, i16 {})\n", c_id, src_val));
+                        }
+                        VbType::Integer => {
+                            out.push_str(&format!("  call void @vb6_variant_from_i16(ptr %var_dest_slot_{}, i16 {})\n", c_id, src_val));
+                        }
+                        VbType::Long | VbType::Enum(_) => {
+                            out.push_str(&format!("  call void @vb6_variant_from_i32(ptr %var_dest_slot_{}, i32 {})\n", c_id, src_val));
+                        }
+                        VbType::LongPtr | VbType::LongLong | VbType::Currency => {
+                            out.push_str(&format!("  call void @vb6_variant_from_i64(ptr %var_dest_slot_{}, i64 {})\n", c_id, src_val));
+                        }
+                        VbType::Single => {
+                            out.push_str(&format!("  call void @vb6_variant_from_f32(ptr %var_dest_slot_{}, float {})\n", c_id, src_val));
+                        }
+                        VbType::Double => {
+                            out.push_str(&format!("  call void @vb6_variant_from_f64(ptr %var_dest_slot_{}, double {})\n", c_id, src_val));
+                        }
+                        VbType::Date => {
+                            out.push_str(&format!("  call void @vb6_variant_from_date(ptr %var_dest_slot_{}, double {})\n", c_id, src_val));
+                        }
+                        VbType::String => {
+                            out.push_str(&format!("  call void @vb6_variant_from_str(ptr %var_dest_slot_{}, ptr {})\n", c_id, src_val));
+                        }
+                        VbType::Variant => {
+                            out.push_str(&format!("  %var_src_slot_{} = alloca [24 x i8], align 8\n", c_id));
+                            out.push_str(&format!("  store [24 x i8] {}, ptr %var_src_slot_{}\n", src_val, c_id));
+                            out.push_str(&format!("  call void @vb6_variant_copy(ptr %var_dest_slot_{}, ptr %var_src_slot_{})\n", c_id, c_id));
+                        }
+                        _ => {
+                            out.push_str(&format!("  call void @vb6_variant_from_empty(ptr %var_dest_slot_{})\n", c_id));
+                        }
+                    }
+                    out.push_str(&format!("  %t{} = load [24 x i8], ptr %var_dest_slot_{}\n", dest, c_id));
+                } else if from_type == &VbType::Variant {
+                    *branch_counter += 1;
+                    let c_id = *branch_counter;
+                    out.push_str(&format!("  %var_src_slot_{} = alloca [24 x i8], align 8\n", c_id));
+                    out.push_str(&format!("  store [24 x i8] {}, ptr %var_src_slot_{}\n", src_val, c_id));
+                    match to_type {
+                        VbType::Byte => {
+                            out.push_str(&format!("  %t{} = call i8 @vb6_variant_to_i8(ptr %var_src_slot_{})\n", dest, c_id));
+                        }
+                        VbType::Boolean => {
+                            out.push_str(&format!("  %t{} = call i16 @vb6_variant_to_bool(ptr %var_src_slot_{})\n", dest, c_id));
+                        }
+                        VbType::Integer => {
+                            out.push_str(&format!("  %t{} = call i16 @vb6_variant_to_i16(ptr %var_src_slot_{})\n", dest, c_id));
+                        }
+                        VbType::Long | VbType::Enum(_) => {
+                            out.push_str(&format!("  %t{} = call i32 @vb6_variant_to_i32(ptr %var_src_slot_{})\n", dest, c_id));
+                        }
+                        VbType::LongPtr | VbType::LongLong | VbType::Currency => {
+                            out.push_str(&format!("  %t{} = call i64 @vb6_variant_to_i64(ptr %var_src_slot_{})\n", dest, c_id));
+                        }
+                        VbType::Single => {
+                            out.push_str(&format!("  %t{} = call float @vb6_variant_to_f32(ptr %var_src_slot_{})\n", dest, c_id));
+                        }
+                        VbType::Double | VbType::Date => {
+                            out.push_str(&format!("  %t{} = call double @vb6_variant_to_f64(ptr %var_src_slot_{})\n", dest, c_id));
+                        }
+                        VbType::String => {
+                            out.push_str(&format!("  %t{} = call ptr @vb6_variant_to_str(ptr %var_src_slot_{})\n", dest, c_id));
+                        }
+                        _ => {
+                            out.push_str(&format!("  %t{} = call i32 @vb6_variant_to_i32(ptr %var_src_slot_{})\n", dest, c_id));
+                        }
+                    }
+                } else if to_type == &VbType::String {
                     if from_type == &VbType::String {
                         out.push_str(&format!(
                             "  %t{} = call ptr @vb6_string_alloc(ptr {})\n",
@@ -801,6 +1067,35 @@ impl LlvmEmitter {
                     } else {
                         out.push_str(&format!("  %t{} = fptosi double %val_dbl_{} to {}\n", dest, c_id, to_llvm_ty));
                     }
+                } else if to_type == &VbType::Boolean {
+                    if from_type.is_floating() {
+                        *branch_counter += 1;
+                        let c_id = *branch_counter;
+                        out.push_str(&format!("  %cmp_bool_{} = fcmp one {} {}, 0.0\n", c_id, Self::llvm_type(from_type), src_val));
+                        out.push_str(&format!("  %t{} = select i1 %cmp_bool_{}, i16 -1, i16 0\n", dest, c_id));
+                    } else if from_type.is_integer() {
+                        *branch_counter += 1;
+                        let c_id = *branch_counter;
+                        out.push_str(&format!("  %cmp_bool_{} = icmp ne {} {}, 0\n", c_id, Self::llvm_type(from_type), src_val));
+                        out.push_str(&format!("  %t{} = select i1 %cmp_bool_{}, i16 -1, i16 0\n", dest, c_id));
+                    } else {
+                        out.push_str(&format!("  %t{} = add i16 {}, 0\n", dest, src_val));
+                    }
+                } else if from_type == &VbType::Boolean {
+                    if to_type.is_floating() {
+                        out.push_str(&format!("  %t{} = sitofp i16 {} to {}\n", dest, src_val, to_llvm_ty));
+                    } else if to_type == &VbType::Byte {
+                        out.push_str(&format!("  %t{} = trunc i16 {} to i8\n", dest, src_val));
+                    } else if to_type.is_integer() {
+                        let to_size = to_type.size_in_bytes(true);
+                        if to_size > 2 {
+                            out.push_str(&format!("  %t{} = sext i16 {} to {}\n", dest, src_val, to_llvm_ty));
+                        } else {
+                            out.push_str(&format!("  %t{} = add i16 {}, 0\n", dest, src_val));
+                        }
+                    } else {
+                        out.push_str(&format!("  %t{} = add i16 {}, 0\n", dest, src_val));
+                    }
                 } else if from_type.is_integer() && to_type.is_integer() {
                     let from_size = from_type.size_in_bytes(true);
                     let to_size = to_type.size_in_bytes(true);
@@ -866,6 +1161,13 @@ impl LlvmEmitter {
                 for arg in args {
                     let (arg_val, arg_ty) = self.format_operand(arg, local_types, global_types, temp_types, string_constants);
                     match arg_ty.as_str() {
+                        "[24 x i8]" => {
+                            *branch_counter += 1;
+                            let c_id = *branch_counter;
+                            out.push_str(&format!("  %var_prn_slot_{} = alloca [24 x i8], align 8\n", c_id));
+                            out.push_str(&format!("  store [24 x i8] {}, ptr %var_prn_slot_{}\n", arg_val, c_id));
+                            out.push_str(&format!("  call void @vb6_debug_print_variant(ptr %var_prn_slot_{})\n", c_id));
+                        }
                         "ptr" => out.push_str(&format!("  call void @vb6_debug_print(ptr {})\n", arg_val)),
                         "i8" => out.push_str(&format!("  call void @vb6_debug_print_i8(i8 {})\n", arg_val)),
                         "i16" => out.push_str(&format!("  call void @vb6_debug_print_i16(i16 {})\n", arg_val)),
@@ -1220,7 +1522,10 @@ impl LlvmEmitter {
                     (val.to_string(), "i16".to_string())
                 }
                 IrConstant::Date(_) => ("0.0".to_string(), "double".to_string()),
-                IrConstant::Null | IrConstant::Empty | IrConstant::Nothing => {
+                IrConstant::Empty => {
+                    ("zeroinitializer".to_string(), "[24 x i8]".to_string())
+                }
+                IrConstant::Null | IrConstant::Nothing => {
                     ("null".to_string(), "ptr".to_string())
                 }
             },
@@ -1313,6 +1618,16 @@ fn cast_arg(
             } else if ty == "i8" || ty == "i16" || ty == "i32" || ty == "i64" {
                 out.push_str(&format!("  {} = sitofp {} {} to double\n", cast_name, ty, val));
                 (cast_name, "double".to_string())
+            } else {
+                (val.to_string(), ty.to_string())
+            }
+        }
+        "ptr" => {
+            if ty == "[24 x i8]" {
+                let slot = format!("%var_arg_slot_{}", counter);
+                out.push_str(&format!("  {} = alloca [24 x i8], align 8\n", slot));
+                out.push_str(&format!("  store [24 x i8] {}, ptr {}\n", val, slot));
+                (slot, "ptr".to_string())
             } else {
                 (val.to_string(), ty.to_string())
             }

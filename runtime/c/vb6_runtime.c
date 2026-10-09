@@ -33,11 +33,11 @@ void vb6_debug_print(const char* msg) {
     }
 }
 
-void vb6_debug_print_i8(char val) {
-    printf("%d\n", (int)val);
+void vb6_debug_print_i8(unsigned char val) {
+    printf("%u\n", (unsigned int)val);
     fflush(stdout);
     char buf[32];
-    sprintf_s(buf, sizeof(buf), "%d\n", (int)val);
+    sprintf_s(buf, sizeof(buf), "%u\n", (unsigned int)val);
     OutputDebugStringA(buf);
 }
 
@@ -479,4 +479,428 @@ int vb6_string_compare(const char* s1, const char* s2) {
     const char* str2 = s2 ? s2 : "";
     return strcmp(str1, str2);
 }
+
+// -------------------------------------------------------------
+// VB6 Variant Runtime Subsystem
+// -------------------------------------------------------------
+
+#define VT_EMPTY    0
+#define VT_NULL     1
+#define VT_I2       2
+#define VT_I4       3
+#define VT_R4       4
+#define VT_R8       5
+#define VT_CY       6
+#define VT_DATE     7
+#define VT_BSTR     8
+#define VT_DISPATCH 9
+#define VT_ERROR    10
+#define VT_BOOL     11
+#define VT_VARIANT  12
+#define VT_UNKNOWN  13
+#define VT_DECIMAL  14
+#define VT_I1       16
+#define VT_UI1      17
+#define VT_I8       20
+#define VT_ARRAY    0x2000
+#define VT_BYREF    0x4000
+
+typedef struct {
+    unsigned short vt;
+    unsigned short reserved1;
+    unsigned short reserved2;
+    unsigned short reserved3;
+    union {
+        char cVal;
+        unsigned char bVal;
+        short iVal;
+        int lVal;
+        long long llVal;
+        float fltVal;
+        double dblVal;
+        short boolVal;
+        char* strVal;
+        void* pArray;
+        void* pObj;
+        void* pVal;
+        long long pad[2];
+    } data;
+} Vb6Variant;
+
+void vb6_variant_init(Vb6Variant* v) {
+    if (!v) return;
+    memset(v, 0, sizeof(Vb6Variant));
+    v->vt = VT_EMPTY;
+}
+
+void vb6_variant_clear(Vb6Variant* v) {
+    if (!v) return;
+    if (v->vt == VT_BSTR && v->data.strVal) {
+        free(v->data.strVal);
+        v->data.strVal = NULL;
+    }
+    memset(v, 0, sizeof(Vb6Variant));
+    v->vt = VT_EMPTY;
+}
+
+void vb6_variant_copy(Vb6Variant* dest, const Vb6Variant* src) {
+    if (!dest) return;
+    if (dest == src) return;
+    vb6_variant_clear(dest);
+    if (!src) {
+        dest->vt = VT_EMPTY;
+        return;
+    }
+    memcpy(dest, src, sizeof(Vb6Variant));
+    if (src->vt == VT_BSTR && src->data.strVal) {
+        dest->data.strVal = _strdup(src->data.strVal);
+    }
+}
+
+void vb6_variant_from_i8(Vb6Variant* v, char val) {
+    if (!v) return;
+    vb6_variant_clear(v);
+    v->vt = VT_UI1;
+    v->data.bVal = (unsigned char)val;
+}
+
+void vb6_variant_from_i16(Vb6Variant* v, short val) {
+    if (!v) return;
+    vb6_variant_clear(v);
+    v->vt = VT_I2;
+    v->data.iVal = val;
+}
+
+void vb6_variant_from_i32(Vb6Variant* v, int val) {
+    if (!v) return;
+    vb6_variant_clear(v);
+    v->vt = VT_I4;
+    v->data.lVal = val;
+}
+
+void vb6_variant_from_i64(Vb6Variant* v, long long val) {
+    if (!v) return;
+    vb6_variant_clear(v);
+    v->vt = VT_I8;
+    v->data.llVal = val;
+}
+
+void vb6_variant_from_f32(Vb6Variant* v, float val) {
+    if (!v) return;
+    vb6_variant_clear(v);
+    v->vt = VT_R4;
+    v->data.fltVal = val;
+}
+
+void vb6_variant_from_f64(Vb6Variant* v, double val) {
+    if (!v) return;
+    vb6_variant_clear(v);
+    v->vt = VT_R8;
+    v->data.dblVal = val;
+}
+
+void vb6_variant_from_bool(Vb6Variant* v, short val) {
+    if (!v) return;
+    vb6_variant_clear(v);
+    v->vt = VT_BOOL;
+    v->data.boolVal = val ? -1 : 0;
+}
+
+void vb6_variant_from_str(Vb6Variant* v, const char* s) {
+    if (!v) return;
+    vb6_variant_clear(v);
+    v->vt = VT_BSTR;
+    v->data.strVal = s ? _strdup(s) : _strdup("");
+}
+
+void vb6_variant_from_date(Vb6Variant* v, double val) {
+    if (!v) return;
+    vb6_variant_clear(v);
+    v->vt = VT_DATE;
+    v->data.dblVal = val;
+}
+
+void vb6_variant_from_empty(Vb6Variant* v) {
+    if (!v) return;
+    vb6_variant_clear(v);
+    v->vt = VT_EMPTY;
+}
+
+void vb6_variant_from_null(Vb6Variant* v) {
+    if (!v) return;
+    vb6_variant_clear(v);
+    v->vt = VT_NULL;
+}
+
+double vb6_variant_to_f64(const Vb6Variant* v) {
+    if (!v) return 0.0;
+    switch (v->vt & ~VT_ARRAY & ~VT_BYREF) {
+        case VT_UI1: return (double)v->data.bVal;
+        case VT_I2: return (double)v->data.iVal;
+        case VT_I4: return (double)v->data.lVal;
+        case VT_I8: return (double)v->data.llVal;
+        case VT_R4: return (double)v->data.fltVal;
+        case VT_R8:
+        case VT_DATE: return v->data.dblVal;
+        case VT_BOOL: return v->data.boolVal ? -1.0 : 0.0;
+        case VT_BSTR: return v->data.strVal ? atof(v->data.strVal) : 0.0;
+        default: return 0.0;
+    }
+}
+
+int vb6_variant_to_i32(const Vb6Variant* v) {
+    return (int)vb6_variant_to_f64(v);
+}
+
+short vb6_variant_to_i16(const Vb6Variant* v) {
+    return (short)vb6_variant_to_f64(v);
+}
+
+char vb6_variant_to_i8(const Vb6Variant* v) {
+    return (char)vb6_variant_to_f64(v);
+}
+
+long long vb6_variant_to_i64(const Vb6Variant* v) {
+    if (v && v->vt == VT_I8) return v->data.llVal;
+    return (long long)vb6_variant_to_f64(v);
+}
+
+float vb6_variant_to_f32(const Vb6Variant* v) {
+    return (float)vb6_variant_to_f64(v);
+}
+
+short vb6_variant_to_bool(const Vb6Variant* v) {
+    return (vb6_variant_to_f64(v) != 0.0) ? -1 : 0;
+}
+
+char* vb6_variant_to_str(const Vb6Variant* v) {
+    if (!v) return _strdup("");
+    switch (v->vt & ~VT_ARRAY & ~VT_BYREF) {
+        case VT_EMPTY:
+        case VT_NULL:
+            return _strdup("");
+        case VT_BSTR:
+            return _strdup(v->data.strVal ? v->data.strVal : "");
+        case VT_BOOL:
+            return _strdup(v->data.boolVal ? "True" : "False");
+        case VT_I8: {
+            char buf[32];
+            sprintf_s(buf, sizeof(buf), "%lld", v->data.llVal);
+            return _strdup(buf);
+        }
+        case VT_UI1: {
+            char buf[32];
+            sprintf_s(buf, sizeof(buf), "%u", (unsigned int)v->data.bVal);
+            return _strdup(buf);
+        }
+        case VT_I2: {
+            char buf[32];
+            sprintf_s(buf, sizeof(buf), "%d", (int)v->data.iVal);
+            return _strdup(buf);
+        }
+        case VT_I4: {
+            char buf[32];
+            sprintf_s(buf, sizeof(buf), "%d", v->data.lVal);
+            return _strdup(buf);
+        }
+        case VT_R4: {
+            char buf[64];
+            sprintf_s(buf, sizeof(buf), "%g", (double)v->data.fltVal);
+            return _strdup(buf);
+        }
+        case VT_R8:
+        case VT_DATE: {
+            char buf[64];
+            sprintf_s(buf, sizeof(buf), "%g", v->data.dblVal);
+            return _strdup(buf);
+        }
+        default:
+            return _strdup("");
+    }
+}
+
+int vb6_variant_vartype(const Vb6Variant* v) {
+    return v ? (int)v->vt : VT_EMPTY;
+}
+
+char* vb6_variant_typename(const Vb6Variant* v) {
+    if (!v) return _strdup("Empty");
+    switch (v->vt & ~VT_ARRAY & ~VT_BYREF) {
+        case VT_EMPTY: return _strdup("Empty");
+        case VT_NULL: return _strdup("Null");
+        case VT_I2: return _strdup("Integer");
+        case VT_I4: return _strdup("Long");
+        case VT_R4: return _strdup("Single");
+        case VT_R8: return _strdup("Double");
+        case VT_CY: return _strdup("Currency");
+        case VT_DATE: return _strdup("Date");
+        case VT_BSTR: return _strdup("String");
+        case VT_DISPATCH:
+        case VT_UNKNOWN: return _strdup("Object");
+        case VT_BOOL: return _strdup("Boolean");
+        case VT_UI1: return _strdup("Byte");
+        case VT_I8: return _strdup("LongLong");
+        default: return _strdup("Variant");
+    }
+}
+
+short vb6_variant_is_empty(const Vb6Variant* v) {
+    return (!v || v->vt == VT_EMPTY) ? -1 : 0;
+}
+
+short vb6_variant_is_null(const Vb6Variant* v) {
+    return (v && v->vt == VT_NULL) ? -1 : 0;
+}
+
+short vb6_variant_is_numeric(const Vb6Variant* v) {
+    if (!v) return 0;
+    switch (v->vt) {
+        case VT_UI1:
+        case VT_I2:
+        case VT_I4:
+        case VT_I8:
+        case VT_R4:
+        case VT_R8:
+        case VT_CY:
+        case VT_BOOL:
+            return -1;
+        case VT_BSTR: {
+            if (!v->data.strVal || !*v->data.strVal) return 0;
+            char* end;
+            strtod(v->data.strVal, &end);
+            while (*end && isspace((unsigned char)*end)) end++;
+            return (*end == '\0') ? -1 : 0;
+        }
+        default:
+            return 0;
+    }
+}
+
+short vb6_variant_is_date(const Vb6Variant* v) {
+    return (v && v->vt == VT_DATE) ? -1 : 0;
+}
+
+short vb6_variant_is_array(const Vb6Variant* v) {
+    return (v && (v->vt & VT_ARRAY) != 0) ? -1 : 0;
+}
+
+void vb6_variant_add(Vb6Variant* res, const Vb6Variant* l, const Vb6Variant* r) {
+    if (!res) return;
+    if (l && r && l->vt == VT_BSTR && r->vt == VT_BSTR) {
+        char* joined = vb6_string_concat(l->data.strVal, r->data.strVal);
+        vb6_variant_from_str(res, joined);
+        if (joined) free(joined);
+        return;
+    }
+    if ((l && (l->vt == VT_R8 || l->vt == VT_R4)) || (r && (r->vt == VT_R8 || r->vt == VT_R4))) {
+        double d = vb6_variant_to_f64(l) + vb6_variant_to_f64(r);
+        vb6_variant_from_f64(res, d);
+    } else if ((l && l->vt == VT_I8) || (r && r->vt == VT_I8)) {
+        long long ll = vb6_variant_to_i64(l) + vb6_variant_to_i64(r);
+        vb6_variant_from_i64(res, ll);
+    } else {
+        int i = vb6_variant_to_i32(l) + vb6_variant_to_i32(r);
+        vb6_variant_from_i32(res, i);
+    }
+}
+
+void vb6_variant_sub(Vb6Variant* res, const Vb6Variant* l, const Vb6Variant* r) {
+    if (!res) return;
+    if ((l && (l->vt == VT_R8 || l->vt == VT_R4)) || (r && (r->vt == VT_R8 || r->vt == VT_R4))) {
+        vb6_variant_from_f64(res, vb6_variant_to_f64(l) - vb6_variant_to_f64(r));
+    } else {
+        vb6_variant_from_i32(res, vb6_variant_to_i32(l) - vb6_variant_to_i32(r));
+    }
+}
+
+void vb6_variant_mul(Vb6Variant* res, const Vb6Variant* l, const Vb6Variant* r) {
+    if (!res) return;
+    if ((l && (l->vt == VT_R8 || l->vt == VT_R4)) || (r && (r->vt == VT_R8 || r->vt == VT_R4))) {
+        vb6_variant_from_f64(res, vb6_variant_to_f64(l) * vb6_variant_to_f64(r));
+    } else {
+        vb6_variant_from_i32(res, vb6_variant_to_i32(l) * vb6_variant_to_i32(r));
+    }
+}
+
+void vb6_variant_div(Vb6Variant* res, const Vb6Variant* l, const Vb6Variant* r) {
+    if (!res) return;
+    double den = vb6_variant_to_f64(r);
+    vb6_variant_from_f64(res, den != 0.0 ? (vb6_variant_to_f64(l) / den) : 0.0);
+}
+
+void vb6_variant_int_div(Vb6Variant* res, const Vb6Variant* l, const Vb6Variant* r) {
+    if (!res) return;
+    int den = vb6_variant_to_i32(r);
+    vb6_variant_from_i32(res, den != 0 ? (vb6_variant_to_i32(l) / den) : 0);
+}
+
+void vb6_variant_mod(Vb6Variant* res, const Vb6Variant* l, const Vb6Variant* r) {
+    if (!res) return;
+    int den = vb6_variant_to_i32(r);
+    vb6_variant_from_i32(res, den != 0 ? (vb6_variant_to_i32(l) % den) : 0);
+}
+
+void vb6_variant_concat(Vb6Variant* res, const Vb6Variant* l, const Vb6Variant* r) {
+    if (!res) return;
+    char* s1 = vb6_variant_to_str(l);
+    char* s2 = vb6_variant_to_str(r);
+    char* joined = vb6_string_concat(s1, s2);
+    vb6_variant_from_str(res, joined);
+    if (s1) free(s1);
+    if (s2) free(s2);
+    if (joined) free(joined);
+}
+
+void vb6_variant_neg(Vb6Variant* res, const Vb6Variant* v) {
+    if (!res) return;
+    if (v && (v->vt == VT_R8 || v->vt == VT_R4)) {
+        vb6_variant_from_f64(res, -vb6_variant_to_f64(v));
+    } else {
+        vb6_variant_from_i32(res, -vb6_variant_to_i32(v));
+    }
+}
+
+void vb6_variant_not(Vb6Variant* res, const Vb6Variant* v) {
+    if (!res) return;
+    int val = vb6_variant_to_i32(v);
+    vb6_variant_from_i32(res, ~val);
+}
+
+void vb6_variant_and(Vb6Variant* res, const Vb6Variant* l, const Vb6Variant* r) {
+    if (!res) return;
+    vb6_variant_from_i32(res, vb6_variant_to_i32(l) & vb6_variant_to_i32(r));
+}
+
+void vb6_variant_or(Vb6Variant* res, const Vb6Variant* l, const Vb6Variant* r) {
+    if (!res) return;
+    vb6_variant_from_i32(res, vb6_variant_to_i32(l) | vb6_variant_to_i32(r));
+}
+
+void vb6_variant_xor(Vb6Variant* res, const Vb6Variant* l, const Vb6Variant* r) {
+    if (!res) return;
+    vb6_variant_from_i32(res, vb6_variant_to_i32(l) ^ vb6_variant_to_i32(r));
+}
+
+int vb6_variant_compare(const Vb6Variant* l, const Vb6Variant* r) {
+    if (!l && !r) return 0;
+    if (!l) return -1;
+    if (!r) return 1;
+    if (l->vt == VT_BSTR && r->vt == VT_BSTR) {
+        return strcmp(l->data.strVal ? l->data.strVal : "", r->data.strVal ? r->data.strVal : "");
+    }
+    double dl = vb6_variant_to_f64(l);
+    double dr = vb6_variant_to_f64(r);
+    return (dl < dr) ? -1 : (dl > dr ? 1 : 0);
+}
+
+short vb6_variant_equal(const Vb6Variant* l, const Vb6Variant* r) {
+    return (vb6_variant_compare(l, r) == 0) ? -1 : 0;
+}
+
+void vb6_debug_print_variant(const Vb6Variant* v) {
+    char* s = vb6_variant_to_str(v);
+    vb6_debug_print(s);
+    if (s) free(s);
+}
+
 

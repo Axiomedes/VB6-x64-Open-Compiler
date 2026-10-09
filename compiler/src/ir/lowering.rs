@@ -124,6 +124,23 @@ impl AstToIrLowering {
         }
     }
 
+    pub fn coerce_to_variant(&mut self, op: Operand) -> Operand {
+        let ty = self.infer_operand_type(&op);
+        if ty != VbType::Variant {
+            let dest = self.next_temp();
+            self.temp_types.insert(dest, VbType::Variant);
+            self.emit(IrInstruction::Coerce {
+                dest,
+                src: op,
+                from_type: ty,
+                to_type: VbType::Variant,
+            });
+            Operand::Temp(dest)
+        } else {
+            op
+        }
+    }
+
     fn next_temp(&mut self) -> usize {
         let t = self.temp_counter;
         self.temp_counter += 1;
@@ -1276,14 +1293,29 @@ impl AstToIrLowering {
 
                 match op {
                     BinaryOperator::Concat => {
-                        let l_op = self.coerce_to_string(left_op);
-                        let r_op = self.coerce_to_string(right_op);
-                        self.temp_types.insert(dest, VbType::String);
-                        self.emit(IrInstruction::StringConcat {
-                            dest,
-                            left: l_op,
-                            right: r_op,
-                        });
+                        let left_ty = self.infer_operand_type(&left_op);
+                        let right_ty = self.infer_operand_type(&right_op);
+                        if left_ty == VbType::Variant || right_ty == VbType::Variant {
+                            let l_op = self.coerce_to_variant(left_op);
+                            let r_op = self.coerce_to_variant(right_op);
+                            self.temp_types.insert(dest, VbType::Variant);
+                            self.emit(IrInstruction::BinaryOp {
+                                dest,
+                                op: IrBinaryOp::Concat,
+                                left: l_op,
+                                right: r_op,
+                                result_type: VbType::Variant,
+                            });
+                        } else {
+                            let l_op = self.coerce_to_string(left_op);
+                            let r_op = self.coerce_to_string(right_op);
+                            self.temp_types.insert(dest, VbType::String);
+                            self.emit(IrInstruction::StringConcat {
+                                dest,
+                                left: l_op,
+                                right: r_op,
+                            });
+                        }
                     }
                     BinaryOperator::Equal
                     | BinaryOperator::NotEqual
@@ -1293,7 +1325,9 @@ impl AstToIrLowering {
                     | BinaryOperator::GreaterThanOrEqual => {
                         let left_ty = self.infer_operand_type(&left_op);
                         let right_ty = self.infer_operand_type(&right_op);
-                        let (l_op, r_op) = if left_ty == VbType::String || right_ty == VbType::String {
+                        let (l_op, r_op) = if left_ty == VbType::Variant || right_ty == VbType::Variant {
+                            (self.coerce_to_variant(left_op), self.coerce_to_variant(right_op))
+                        } else if left_ty == VbType::String || right_ty == VbType::String {
                             (self.coerce_to_string(left_op), self.coerce_to_string(right_op))
                         } else {
                             (left_op, right_op)
@@ -1307,6 +1341,7 @@ impl AstToIrLowering {
                             BinaryOperator::GreaterThanOrEqual => IrCompareOp::GreaterThanOrEqual,
                             _ => unreachable!(),
                         };
+                        self.temp_types.insert(dest, VbType::Boolean);
                         self.emit(IrInstruction::Compare {
                             dest,
                             op: cmp_op,
@@ -1317,7 +1352,18 @@ impl AstToIrLowering {
                     BinaryOperator::Add => {
                         let left_ty = self.infer_operand_type(&left_op);
                         let right_ty = self.infer_operand_type(&right_op);
-                        if left_ty == VbType::String || right_ty == VbType::String {
+                        if left_ty == VbType::Variant || right_ty == VbType::Variant {
+                            let l_op = self.coerce_to_variant(left_op);
+                            let r_op = self.coerce_to_variant(right_op);
+                            self.temp_types.insert(dest, VbType::Variant);
+                            self.emit(IrInstruction::BinaryOp {
+                                dest,
+                                op: IrBinaryOp::Add,
+                                left: l_op,
+                                right: r_op,
+                                result_type: VbType::Variant,
+                            });
+                        } else if left_ty == VbType::String || right_ty == VbType::String {
                             let l_op = self.coerce_to_string(left_op);
                             let r_op = self.coerce_to_string(right_op);
                             self.temp_types.insert(dest, VbType::String);
@@ -1342,84 +1388,200 @@ impl AstToIrLowering {
                     BinaryOperator::Subtract => {
                         let left_ty = self.infer_operand_type(&left_op);
                         let right_ty = self.infer_operand_type(&right_op);
-                        let res_ty = crate::types::promote_binary_operator(&left_ty, op, &right_ty)
-                            .unwrap_or(VbType::Long);
-                        self.temp_types.insert(dest, res_ty.clone());
-                        self.emit(IrInstruction::BinaryOp {
-                            dest,
-                            op: IrBinaryOp::Sub,
-                            left: left_op,
-                            right: right_op,
-                            result_type: res_ty,
-                        });
+                        if left_ty == VbType::Variant || right_ty == VbType::Variant {
+                            let l_op = self.coerce_to_variant(left_op);
+                            let r_op = self.coerce_to_variant(right_op);
+                            self.temp_types.insert(dest, VbType::Variant);
+                            self.emit(IrInstruction::BinaryOp {
+                                dest,
+                                op: IrBinaryOp::Sub,
+                                left: l_op,
+                                right: r_op,
+                                result_type: VbType::Variant,
+                            });
+                        } else {
+                            let res_ty = crate::types::promote_binary_operator(&left_ty, op, &right_ty)
+                                .unwrap_or(VbType::Long);
+                            self.temp_types.insert(dest, res_ty.clone());
+                            self.emit(IrInstruction::BinaryOp {
+                                dest,
+                                op: IrBinaryOp::Sub,
+                                left: left_op,
+                                right: right_op,
+                                result_type: res_ty,
+                            });
+                        }
                     }
                     BinaryOperator::Multiply => {
                         let left_ty = self.infer_operand_type(&left_op);
                         let right_ty = self.infer_operand_type(&right_op);
-                        let res_ty = crate::types::promote_binary_operator(&left_ty, op, &right_ty)
-                            .unwrap_or(VbType::Long);
-                        self.temp_types.insert(dest, res_ty.clone());
-                        self.emit(IrInstruction::BinaryOp {
-                            dest,
-                            op: IrBinaryOp::Mul,
-                            left: left_op,
-                            right: right_op,
-                            result_type: res_ty,
-                        });
+                        if left_ty == VbType::Variant || right_ty == VbType::Variant {
+                            let l_op = self.coerce_to_variant(left_op);
+                            let r_op = self.coerce_to_variant(right_op);
+                            self.temp_types.insert(dest, VbType::Variant);
+                            self.emit(IrInstruction::BinaryOp {
+                                dest,
+                                op: IrBinaryOp::Mul,
+                                left: l_op,
+                                right: r_op,
+                                result_type: VbType::Variant,
+                            });
+                        } else {
+                            let res_ty = crate::types::promote_binary_operator(&left_ty, op, &right_ty)
+                                .unwrap_or(VbType::Long);
+                            self.temp_types.insert(dest, res_ty.clone());
+                            self.emit(IrInstruction::BinaryOp {
+                                dest,
+                                op: IrBinaryOp::Mul,
+                                left: left_op,
+                                right: right_op,
+                                result_type: res_ty,
+                            });
+                        }
                     }
                     BinaryOperator::Divide => {
-                        self.emit(IrInstruction::BinaryOp {
-                            dest,
-                            op: IrBinaryOp::Div,
-                            left: left_op,
-                            right: right_op,
-                            result_type: VbType::Double,
-                        });
+                        let left_ty = self.infer_operand_type(&left_op);
+                        let right_ty = self.infer_operand_type(&right_op);
+                        if left_ty == VbType::Variant || right_ty == VbType::Variant {
+                            let l_op = self.coerce_to_variant(left_op);
+                            let r_op = self.coerce_to_variant(right_op);
+                            self.temp_types.insert(dest, VbType::Variant);
+                            self.emit(IrInstruction::BinaryOp {
+                                dest,
+                                op: IrBinaryOp::Div,
+                                left: l_op,
+                                right: r_op,
+                                result_type: VbType::Variant,
+                            });
+                        } else {
+                            self.emit(IrInstruction::BinaryOp {
+                                dest,
+                                op: IrBinaryOp::Div,
+                                left: left_op,
+                                right: right_op,
+                                result_type: VbType::Double,
+                            });
+                        }
                     }
                     BinaryOperator::IntegerDivide => {
-                        self.emit(IrInstruction::BinaryOp {
-                            dest,
-                            op: IrBinaryOp::IntDiv,
-                            left: left_op,
-                            right: right_op,
-                            result_type: VbType::Long,
-                        });
+                        let left_ty = self.infer_operand_type(&left_op);
+                        let right_ty = self.infer_operand_type(&right_op);
+                        if left_ty == VbType::Variant || right_ty == VbType::Variant {
+                            let l_op = self.coerce_to_variant(left_op);
+                            let r_op = self.coerce_to_variant(right_op);
+                            self.temp_types.insert(dest, VbType::Variant);
+                            self.emit(IrInstruction::BinaryOp {
+                                dest,
+                                op: IrBinaryOp::IntDiv,
+                                left: l_op,
+                                right: r_op,
+                                result_type: VbType::Variant,
+                            });
+                        } else {
+                            self.emit(IrInstruction::BinaryOp {
+                                dest,
+                                op: IrBinaryOp::IntDiv,
+                                left: left_op,
+                                right: right_op,
+                                result_type: VbType::Long,
+                            });
+                        }
                     }
                     BinaryOperator::Modulo => {
-                        self.emit(IrInstruction::BinaryOp {
-                            dest,
-                            op: IrBinaryOp::Mod,
-                            left: left_op,
-                            right: right_op,
-                            result_type: VbType::Long,
-                        });
+                        let left_ty = self.infer_operand_type(&left_op);
+                        let right_ty = self.infer_operand_type(&right_op);
+                        if left_ty == VbType::Variant || right_ty == VbType::Variant {
+                            let l_op = self.coerce_to_variant(left_op);
+                            let r_op = self.coerce_to_variant(right_op);
+                            self.temp_types.insert(dest, VbType::Variant);
+                            self.emit(IrInstruction::BinaryOp {
+                                dest,
+                                op: IrBinaryOp::Mod,
+                                left: l_op,
+                                right: r_op,
+                                result_type: VbType::Variant,
+                            });
+                        } else {
+                            self.emit(IrInstruction::BinaryOp {
+                                dest,
+                                op: IrBinaryOp::Mod,
+                                left: left_op,
+                                right: right_op,
+                                result_type: VbType::Long,
+                            });
+                        }
                     }
                     BinaryOperator::And => {
-                        self.emit(IrInstruction::BinaryOp {
-                            dest,
-                            op: IrBinaryOp::BitAnd,
-                            left: left_op,
-                            right: right_op,
-                            result_type: VbType::Boolean,
-                        });
+                        let left_ty = self.infer_operand_type(&left_op);
+                        let right_ty = self.infer_operand_type(&right_op);
+                        if left_ty == VbType::Variant || right_ty == VbType::Variant {
+                            let l_op = self.coerce_to_variant(left_op);
+                            let r_op = self.coerce_to_variant(right_op);
+                            self.temp_types.insert(dest, VbType::Variant);
+                            self.emit(IrInstruction::BinaryOp {
+                                dest,
+                                op: IrBinaryOp::BitAnd,
+                                left: l_op,
+                                right: r_op,
+                                result_type: VbType::Variant,
+                            });
+                        } else {
+                            self.emit(IrInstruction::BinaryOp {
+                                dest,
+                                op: IrBinaryOp::BitAnd,
+                                left: left_op,
+                                right: right_op,
+                                result_type: VbType::Boolean,
+                            });
+                        }
                     }
                     BinaryOperator::Or => {
-                        self.emit(IrInstruction::BinaryOp {
-                            dest,
-                            op: IrBinaryOp::BitOr,
-                            left: left_op,
-                            right: right_op,
-                            result_type: VbType::Boolean,
-                        });
+                        let left_ty = self.infer_operand_type(&left_op);
+                        let right_ty = self.infer_operand_type(&right_op);
+                        if left_ty == VbType::Variant || right_ty == VbType::Variant {
+                            let l_op = self.coerce_to_variant(left_op);
+                            let r_op = self.coerce_to_variant(right_op);
+                            self.temp_types.insert(dest, VbType::Variant);
+                            self.emit(IrInstruction::BinaryOp {
+                                dest,
+                                op: IrBinaryOp::BitOr,
+                                left: l_op,
+                                right: r_op,
+                                result_type: VbType::Variant,
+                            });
+                        } else {
+                            self.emit(IrInstruction::BinaryOp {
+                                dest,
+                                op: IrBinaryOp::BitOr,
+                                left: left_op,
+                                right: right_op,
+                                result_type: VbType::Boolean,
+                            });
+                        }
                     }
                     BinaryOperator::Xor => {
-                        self.emit(IrInstruction::BinaryOp {
-                            dest,
-                            op: IrBinaryOp::BitXor,
-                            left: left_op,
-                            right: right_op,
-                            result_type: VbType::Boolean,
-                        });
+                        let left_ty = self.infer_operand_type(&left_op);
+                        let right_ty = self.infer_operand_type(&right_op);
+                        if left_ty == VbType::Variant || right_ty == VbType::Variant {
+                            let l_op = self.coerce_to_variant(left_op);
+                            let r_op = self.coerce_to_variant(right_op);
+                            self.temp_types.insert(dest, VbType::Variant);
+                            self.emit(IrInstruction::BinaryOp {
+                                dest,
+                                op: IrBinaryOp::BitXor,
+                                left: l_op,
+                                right: r_op,
+                                result_type: VbType::Variant,
+                            });
+                        } else {
+                            self.emit(IrInstruction::BinaryOp {
+                                dest,
+                                op: IrBinaryOp::BitXor,
+                                left: left_op,
+                                right: right_op,
+                                result_type: VbType::Boolean,
+                            });
+                        }
                     }
                     _ => {
                         self.emit(IrInstruction::BinaryOp {
@@ -1436,18 +1598,35 @@ impl AstToIrLowering {
             }
             Expression::UnaryOp { op, operand } => {
                 let opnd = self.lower_expression(operand);
+                let opnd_ty = self.infer_operand_type(&opnd);
                 let dest = self.next_temp();
-                let ir_op = match op {
-                    UnaryOperator::Negate => IrUnaryOp::Negate,
-                    UnaryOperator::Not => IrUnaryOp::BitNot,
-                    UnaryOperator::Plus => return opnd,
-                };
-                self.emit(IrInstruction::UnaryOp {
-                    dest,
-                    op: ir_op,
-                    operand: opnd,
-                    result_type: VbType::Long,
-                });
+                if opnd_ty == VbType::Variant {
+                    let var_op = self.coerce_to_variant(opnd);
+                    let ir_op = match op {
+                        UnaryOperator::Negate => IrUnaryOp::Negate,
+                        UnaryOperator::Not => IrUnaryOp::BitNot,
+                        UnaryOperator::Plus => return var_op,
+                    };
+                    self.temp_types.insert(dest, VbType::Variant);
+                    self.emit(IrInstruction::UnaryOp {
+                        dest,
+                        op: ir_op,
+                        operand: var_op,
+                        result_type: VbType::Variant,
+                    });
+                } else {
+                    let ir_op = match op {
+                        UnaryOperator::Negate => IrUnaryOp::Negate,
+                        UnaryOperator::Not => IrUnaryOp::BitNot,
+                        UnaryOperator::Plus => return opnd,
+                    };
+                    self.emit(IrInstruction::UnaryOp {
+                        dest,
+                        op: ir_op,
+                        operand: opnd,
+                        result_type: VbType::Long,
+                    });
+                }
                 Operand::Temp(dest)
             }
             Expression::Paren(inner) => self.lower_expression(inner),
@@ -1724,6 +1903,136 @@ impl AstToIrLowering {
                             name: "vb6_string_str".to_string(),
                             args: vec![v_op],
                             return_type: Some(VbType::String),
+                        });
+                        return Operand::Temp(dest);
+                    }
+                    if name.eq_ignore_ascii_case("VarType") {
+                        let raw_op = self.lower_expression(&indices[0]);
+                        let var_op = self.coerce_to_variant(raw_op);
+                        let dest = self.next_temp();
+                        self.temp_types.insert(dest, VbType::Integer);
+                        self.emit(IrInstruction::Call {
+                            dest: Some(dest),
+                            name: "vb6_variant_vartype".to_string(),
+                            args: vec![var_op],
+                            return_type: Some(VbType::Integer),
+                        });
+                        return Operand::Temp(dest);
+                    }
+                    if name.eq_ignore_ascii_case("TypeName") {
+                        let raw_op = self.lower_expression(&indices[0]);
+                        let var_op = self.coerce_to_variant(raw_op);
+                        let dest = self.next_temp();
+                        self.temp_types.insert(dest, VbType::String);
+                        self.emit(IrInstruction::Call {
+                            dest: Some(dest),
+                            name: "vb6_variant_typename".to_string(),
+                            args: vec![var_op],
+                            return_type: Some(VbType::String),
+                        });
+                        return Operand::Temp(dest);
+                    }
+                    if name.eq_ignore_ascii_case("IsEmpty") {
+                        let raw_op = self.lower_expression(&indices[0]);
+                        let var_op = self.coerce_to_variant(raw_op);
+                        let dest = self.next_temp();
+                        self.temp_types.insert(dest, VbType::Boolean);
+                        self.emit(IrInstruction::Call {
+                            dest: Some(dest),
+                            name: "vb6_variant_is_empty".to_string(),
+                            args: vec![var_op],
+                            return_type: Some(VbType::Boolean),
+                        });
+                        return Operand::Temp(dest);
+                    }
+                    if name.eq_ignore_ascii_case("IsNull") {
+                        let raw_op = self.lower_expression(&indices[0]);
+                        let var_op = self.coerce_to_variant(raw_op);
+                        let dest = self.next_temp();
+                        self.temp_types.insert(dest, VbType::Boolean);
+                        self.emit(IrInstruction::Call {
+                            dest: Some(dest),
+                            name: "vb6_variant_is_null".to_string(),
+                            args: vec![var_op],
+                            return_type: Some(VbType::Boolean),
+                        });
+                        return Operand::Temp(dest);
+                    }
+                    if name.eq_ignore_ascii_case("IsNumeric") {
+                        let raw_op = self.lower_expression(&indices[0]);
+                        let var_op = self.coerce_to_variant(raw_op);
+                        let dest = self.next_temp();
+                        self.temp_types.insert(dest, VbType::Boolean);
+                        self.emit(IrInstruction::Call {
+                            dest: Some(dest),
+                            name: "vb6_variant_is_numeric".to_string(),
+                            args: vec![var_op],
+                            return_type: Some(VbType::Boolean),
+                        });
+                        return Operand::Temp(dest);
+                    }
+                    if name.eq_ignore_ascii_case("IsDate") {
+                        let raw_op = self.lower_expression(&indices[0]);
+                        let var_op = self.coerce_to_variant(raw_op);
+                        let dest = self.next_temp();
+                        self.temp_types.insert(dest, VbType::Boolean);
+                        self.emit(IrInstruction::Call {
+                            dest: Some(dest),
+                            name: "vb6_variant_is_date".to_string(),
+                            args: vec![var_op],
+                            return_type: Some(VbType::Boolean),
+                        });
+                        return Operand::Temp(dest);
+                    }
+                    if name.eq_ignore_ascii_case("IsArray") {
+                        let raw_op = self.lower_expression(&indices[0]);
+                        let var_op = self.coerce_to_variant(raw_op);
+                        let dest = self.next_temp();
+                        self.temp_types.insert(dest, VbType::Boolean);
+                        self.emit(IrInstruction::Call {
+                            dest: Some(dest),
+                            name: "vb6_variant_is_array".to_string(),
+                            args: vec![var_op],
+                            return_type: Some(VbType::Boolean),
+                        });
+                        return Operand::Temp(dest);
+                    }
+                    let conv_target = if name.eq_ignore_ascii_case("CBool") {
+                        Some(VbType::Boolean)
+                    } else if name.eq_ignore_ascii_case("CByte") {
+                        Some(VbType::Byte)
+                    } else if name.eq_ignore_ascii_case("CInt") {
+                        Some(VbType::Integer)
+                    } else if name.eq_ignore_ascii_case("CLng") {
+                        Some(VbType::Long)
+                    } else if name.eq_ignore_ascii_case("CSng") {
+                        Some(VbType::Single)
+                    } else if name.eq_ignore_ascii_case("CDbl") {
+                        Some(VbType::Double)
+                    } else if name.eq_ignore_ascii_case("CStr") {
+                        Some(VbType::String)
+                    } else if name.eq_ignore_ascii_case("CDate") {
+                        Some(VbType::Date)
+                    } else if name.eq_ignore_ascii_case("CCur") {
+                        Some(VbType::Currency)
+                    } else if name.eq_ignore_ascii_case("CVar") {
+                        Some(VbType::Variant)
+                    } else {
+                        None
+                    };
+                    if let Some(target_type) = conv_target {
+                        let raw_op = self.lower_expression(&indices[0]);
+                        let from_ty = self.infer_operand_type(&raw_op);
+                        if from_ty == target_type {
+                            return raw_op;
+                        }
+                        let dest = self.next_temp();
+                        self.temp_types.insert(dest, target_type.clone());
+                        self.emit(IrInstruction::Coerce {
+                            dest,
+                            src: raw_op,
+                            from_type: from_ty,
+                            to_type: target_type,
                         });
                         return Operand::Temp(dest);
                     }

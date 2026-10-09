@@ -629,7 +629,7 @@ impl SemanticAnalyzer {
 
                 if let Some(params) = proc_params {
                     self.validate_procedure_call(name, &params, arguments, *span);
-                } else if self.option_explicit {
+                } else if self.option_explicit && !is_intrinsic_function(name) {
                     self.errors.push(SemanticError::UndeclaredIdentifier {
                         name: name.clone(),
                         span: *span,
@@ -800,6 +800,89 @@ impl SemanticAnalyzer {
                         }
                         return VbType::String;
                     }
+                    if name.eq_ignore_ascii_case("VarType") {
+                        for idx in indices {
+                            let _ = self.infer_expression_type(idx);
+                        }
+                        return VbType::Integer;
+                    }
+                    if name.eq_ignore_ascii_case("TypeName") {
+                        for idx in indices {
+                            let _ = self.infer_expression_type(idx);
+                        }
+                        return VbType::String;
+                    }
+                    if name.eq_ignore_ascii_case("IsEmpty")
+                        || name.eq_ignore_ascii_case("IsNull")
+                        || name.eq_ignore_ascii_case("IsNumeric")
+                        || name.eq_ignore_ascii_case("IsDate")
+                        || name.eq_ignore_ascii_case("IsArray")
+                    {
+                        for idx in indices {
+                            let _ = self.infer_expression_type(idx);
+                        }
+                        return VbType::Boolean;
+                    }
+                    if name.eq_ignore_ascii_case("CBool") {
+                        for idx in indices {
+                            let _ = self.infer_expression_type(idx);
+                        }
+                        return VbType::Boolean;
+                    }
+                    if name.eq_ignore_ascii_case("CByte") {
+                        for idx in indices {
+                            let _ = self.infer_expression_type(idx);
+                        }
+                        return VbType::Byte;
+                    }
+                    if name.eq_ignore_ascii_case("CInt") {
+                        for idx in indices {
+                            let _ = self.infer_expression_type(idx);
+                        }
+                        return VbType::Integer;
+                    }
+                    if name.eq_ignore_ascii_case("CLng") {
+                        for idx in indices {
+                            let _ = self.infer_expression_type(idx);
+                        }
+                        return VbType::Long;
+                    }
+                    if name.eq_ignore_ascii_case("CSng") {
+                        for idx in indices {
+                            let _ = self.infer_expression_type(idx);
+                        }
+                        return VbType::Single;
+                    }
+                    if name.eq_ignore_ascii_case("CDbl") {
+                        for idx in indices {
+                            let _ = self.infer_expression_type(idx);
+                        }
+                        return VbType::Double;
+                    }
+                    if name.eq_ignore_ascii_case("CStr") {
+                        for idx in indices {
+                            let _ = self.infer_expression_type(idx);
+                        }
+                        return VbType::String;
+                    }
+                    if name.eq_ignore_ascii_case("CDate") {
+                        for idx in indices {
+                            let _ = self.infer_expression_type(idx);
+                        }
+                        return VbType::Date;
+                    }
+                    if name.eq_ignore_ascii_case("CCur") {
+                        for idx in indices {
+                            let _ = self.infer_expression_type(idx);
+                        }
+                        return VbType::Currency;
+                    }
+                    if name.eq_ignore_ascii_case("CVar") {
+                        for idx in indices {
+                            let _ = self.infer_expression_type(idx);
+                        }
+                        return VbType::Variant;
+                    }
                 }
 
                 let proc_info = if let Expression::Variable(name) = &**target {
@@ -884,4 +967,50 @@ impl SemanticAnalyzer {
             _ => VbType::Variant,
         }
     }
+}
+
+pub fn is_intrinsic_function(name: &str) -> bool {
+    let clean = name.trim_end_matches('$');
+    matches!(
+        clean.to_ascii_uppercase().as_str(),
+        "LBOUND"
+            | "UBOUND"
+            | "LEN"
+            | "INSTR"
+            | "ASC"
+            | "ASCB"
+            | "ASCW"
+            | "VAL"
+            | "LEFT"
+            | "RIGHT"
+            | "MID"
+            | "UCASE"
+            | "LCASE"
+            | "TRIM"
+            | "LTRIM"
+            | "RTRIM"
+            | "SPACE"
+            | "STRING"
+            | "REPLACE"
+            | "CHR"
+            | "CHRW"
+            | "STR"
+            | "VARTYPE"
+            | "TYPENAME"
+            | "ISEMPTY"
+            | "ISNULL"
+            | "ISNUMERIC"
+            | "ISDATE"
+            | "ISARRAY"
+            | "CBOOL"
+            | "CBYTE"
+            | "CINT"
+            | "CLNG"
+            | "CSNG"
+            | "CDBL"
+            | "CSTR"
+            | "CDATE"
+            | "CCUR"
+            | "CVAR"
+    )
 }
