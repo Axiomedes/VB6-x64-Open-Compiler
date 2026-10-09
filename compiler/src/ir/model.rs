@@ -198,4 +198,48 @@ pub enum IrInstruction {
     DebugPrint {
         args: Vec<Operand>,
     },
+    /// Array creation: `%dest = ARRAY_CREATE dims, [(lower, upper)...], elem_type`
+    ArrayCreate {
+        dest: usize,
+        dims: usize,
+        bounds: Vec<(Operand, Operand)>,
+        elem_type: VbType,
+    },
+    /// Array element pointer: `%dest = ARRAY_ELEM_PTR %array, [indices...], elem_type`
+    ArrayElementPtr {
+        dest: usize,
+        array: Operand,
+        indices: Vec<Operand>,
+        elem_type: VbType,
+    },
+    /// Array get element: `%dest = ARRAY_GET_ELEM %array, [indices...], elem_type`
+    ArrayGetElement {
+        dest: usize,
+        array: Operand,
+        indices: Vec<Operand>,
+        elem_type: VbType,
+    },
+    /// Array set element: `ARRAY_SET_ELEM %array, [indices...], %value, elem_type`
+    ArraySetElement {
+        array: Operand,
+        indices: Vec<Operand>,
+        value: Operand,
+        elem_type: VbType,
+    },
+    /// Array re-dimension: `%dest = ARRAY_REDIM %array, dims, [(lower, upper)...], elem_type, preserve`
+    ArrayReDim {
+        dest: usize,
+        array: Operand,
+        dims: usize,
+        bounds: Vec<(Operand, Operand)>,
+        elem_type: VbType,
+        preserve: bool,
+    },
+    /// Array bound (LBound / UBound): `%dest = ARRAY_BOUND %array, %dim, is_ubound`
+    ArrayBound {
+        dest: usize,
+        array: Operand,
+        dim: Operand,
+        is_ubound: bool,
+    },
 }

@@ -119,8 +119,15 @@ pub enum VarDeclKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ArrayDimExpr {
+    pub lower: Option<Expression>,
+    pub upper: Expression,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VariableDeclarator {
     pub name: String,
+    pub dimensions: Option<Vec<ArrayDimExpr>>,
     pub type_spec: Option<TypeSpec>,
     pub init_value: Option<Expression>,
 }

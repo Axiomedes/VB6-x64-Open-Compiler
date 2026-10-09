@@ -178,6 +178,54 @@ impl IrPrinter {
                 let args_str: Vec<String> = args.iter().map(Self::print_operand).collect();
                 format!("DEBUG_PRINT [{}]", args_str.join(", "))
             }
+            IrInstruction::ArrayCreate { dest, dims, bounds, elem_type } => {
+                let bounds_str: Vec<String> = bounds
+                    .iter()
+                    .map(|(lb, ub)| format!("({} To {})", Self::print_operand(lb), Self::print_operand(ub)))
+                    .collect();
+                format!(
+                    "%{} = ARRAY_CREATE dims={}, bounds=[{}], elem_type={:?}",
+                    dest, dims, bounds_str.join(", "), elem_type
+                )
+            }
+            IrInstruction::ArrayElementPtr { dest, array, indices, elem_type } => {
+                let idx_str: Vec<String> = indices.iter().map(Self::print_operand).collect();
+                format!(
+                    "%{} = ARRAY_ELEM_PTR {}, indices=[{}], elem_type={:?}",
+                    dest, Self::print_operand(array), idx_str.join(", "), elem_type
+                )
+            }
+            IrInstruction::ArrayGetElement { dest, array, indices, elem_type } => {
+                let idx_str: Vec<String> = indices.iter().map(Self::print_operand).collect();
+                format!(
+                    "%{} = ARRAY_GET_ELEM {}, indices=[{}], elem_type={:?}",
+                    dest, Self::print_operand(array), idx_str.join(", "), elem_type
+                )
+            }
+            IrInstruction::ArraySetElement { array, indices, value, elem_type } => {
+                let idx_str: Vec<String> = indices.iter().map(Self::print_operand).collect();
+                format!(
+                    "ARRAY_SET_ELEM {}, indices=[{}], val={}, elem_type={:?}",
+                    Self::print_operand(array), idx_str.join(", "), Self::print_operand(value), elem_type
+                )
+            }
+            IrInstruction::ArrayReDim { dest, array, dims, bounds, elem_type, preserve } => {
+                let bounds_str: Vec<String> = bounds
+                    .iter()
+                    .map(|(lb, ub)| format!("({} To {})", Self::print_operand(lb), Self::print_operand(ub)))
+                    .collect();
+                format!(
+                    "%{} = ARRAY_REDIM {}, dims={}, bounds=[{}], elem_type={:?}, preserve={}",
+                    dest, Self::print_operand(array), dims, bounds_str.join(", "), elem_type, preserve
+                )
+            }
+            IrInstruction::ArrayBound { dest, array, dim, is_ubound } => {
+                let name = if *is_ubound { "UBOUND" } else { "LBOUND" };
+                format!(
+                    "%{} = {} {}, dim={}",
+                    dest, name, Self::print_operand(array), Self::print_operand(dim)
+                )
+            }
         }
     }
 

@@ -158,11 +158,16 @@ impl SemanticAnalyzer {
                     });
             }
 
-            let ty = p
+            let mut ty = p
                 .param_type
                 .as_ref()
                 .map(|t| VbType::from_name(&t.name))
                 .unwrap_or(VbType::Variant);
+            if let Some(ref pt) = p.param_type {
+                if !pt.array_dimensions.is_empty() {
+                    ty = VbType::Array(Box::new(ty));
+                }
+            }
 
             param_infos.push(ParameterInfo {
                 name: p.name.clone(),
@@ -229,11 +234,14 @@ impl SemanticAnalyzer {
             }
             Declaration::ModuleVariables(v) => {
                 for var in &v.variables {
-                    let vb_type = var
+                    let mut vb_type = var
                         .type_spec
                         .as_ref()
                         .map(|t| VbType::from_name(&t.name))
                         .unwrap_or(VbType::Variant);
+                    if var.dimensions.is_some() {
+                        vb_type = VbType::Array(Box::new(vb_type));
+                    }
 
                     let sym = Symbol {
                         name: var.name.clone(),
@@ -311,11 +319,16 @@ impl SemanticAnalyzer {
                 self.symbol_table.enter_scope(ScopeKind::Procedure);
                 // Define parameters in procedure scope
                 for p in &s.params {
-                    let vb_type = p
+                    let mut vb_type = p
                         .param_type
                         .as_ref()
                         .map(|t| VbType::from_name(&t.name))
                         .unwrap_or(VbType::Variant);
+                    if let Some(ref pt) = p.param_type {
+                        if !pt.array_dimensions.is_empty() {
+                            vb_type = VbType::Array(Box::new(vb_type));
+                        }
+                    }
                     let sym = Symbol {
                         name: p.name.clone(),
                         kind: SymbolKind::Parameter {
@@ -338,11 +351,16 @@ impl SemanticAnalyzer {
             Declaration::Function(f) => {
                 self.symbol_table.enter_scope(ScopeKind::Procedure);
                 for p in &f.params {
-                    let vb_type = p
+                    let mut vb_type = p
                         .param_type
                         .as_ref()
                         .map(|t| VbType::from_name(&t.name))
                         .unwrap_or(VbType::Variant);
+                    if let Some(ref pt) = p.param_type {
+                        if !pt.array_dimensions.is_empty() {
+                            vb_type = VbType::Array(Box::new(vb_type));
+                        }
+                    }
                     let sym = Symbol {
                         name: p.name.clone(),
                         kind: SymbolKind::Parameter {
@@ -374,11 +392,14 @@ impl SemanticAnalyzer {
                 span,
             } => {
                 for v in variables {
-                    let vb_type = v
+                    let mut vb_type = v
                         .type_spec
                         .as_ref()
                         .map(|t| VbType::from_name(&t.name))
                         .unwrap_or(VbType::Variant);
+                    if v.dimensions.is_some() {
+                        vb_type = VbType::Array(Box::new(vb_type));
+                    }
 
                     let sym = Symbol {
                         name: v.name.clone(),
@@ -665,6 +686,22 @@ impl SemanticAnalyzer {
                 break;
             };
 
+            if param.is_param_array && idx >= params.len() - 1 {
+                let arg_ty = self.infer_expression_type(arg);
+                let elem_type = match &param.vb_type {
+                    VbType::Array(elem) => &**elem,
+                    _ => &VbType::Variant,
+                };
+                if !arg_ty.can_coerce_to(elem_type) && arg_ty != VbType::Unknown {
+                    self.errors.push(SemanticError::TypeMismatch {
+                        expected: elem_type.clone(),
+                        found: arg_ty,
+                        span,
+                    });
+                }
+                continue;
+            }
+
             let arg_ty = self.infer_expression_type(arg);
 
             if !arg_ty.can_coerce_to(&param.vb_type) && arg_ty != VbType::Unknown {
@@ -718,6 +755,15 @@ impl SemanticAnalyzer {
                 }
             }
             Expression::IndexAccess { target, indices } => {
+                if let Expression::Variable(name) = &**target {
+                    if name.eq_ignore_ascii_case("LBound") || name.eq_ignore_ascii_case("UBound") {
+                        for idx in indices {
+                            let _ = self.infer_expression_type(idx);
+                        }
+                        return VbType::Long;
+                    }
+                }
+
                 let proc_info = if let Expression::Variable(name) = &**target {
                     if let Some(sym) = self.symbol_table.lookup(name) {
                         match &sym.kind {

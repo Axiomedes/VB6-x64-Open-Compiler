@@ -515,7 +515,7 @@ impl Parser {
             TokenKind::Set | TokenKind::Let => {
                 let is_set = token.kind == TokenKind::Set;
                 self.advance();
-                let target = self.parse_primary_expression()?;
+                let target = self.parse_postfix()?;
                 self.expect(&TokenKind::Equals, "'=' in assignment")?;
                 let value = self.parse_expression()?;
                 self.expect_statement_terminator("Assignment statement")?;
@@ -540,7 +540,7 @@ impl Parser {
                 }
 
                 // Check assignment: Target = Value or Member.Access = Value
-                let target_expr = self.parse_primary_expression()?;
+                let target_expr = self.parse_postfix()?;
                 if self.match_token(&TokenKind::Equals) {
                     let value = self.parse_expression()?;
                     self.expect_statement_terminator("Assignment statement")?;
@@ -553,8 +553,31 @@ impl Parser {
                 }
 
                 // Sub call command style without Call keyword: SubName Arg1, Arg2
-                let name = match target_expr {
-                    Expression::Variable(n) => n,
+                // or SubName(Arg1, Arg2)
+                let (name, args) = match target_expr {
+                    Expression::Variable(n) => {
+                        let mut args = Vec::new();
+                        while !matches!(self.peek().kind, TokenKind::Newline | TokenKind::Colon | TokenKind::Eof) {
+                            args.push(self.parse_expression()?);
+                            if !self.match_token(&TokenKind::Comma) {
+                                break;
+                            }
+                        }
+                        (n, args)
+                    }
+                    Expression::IndexAccess { target, indices } => {
+                        if let Expression::Variable(n) = *target {
+                            (n, indices)
+                        } else {
+                            let span = token.span;
+                            return Err(ParserError::UnexpectedToken(
+                                token.kind,
+                                span.start_line,
+                                span.start_col,
+                                "statement",
+                            ));
+                        }
+                    }
                     _ => {
                         let span = token.span;
                         return Err(ParserError::UnexpectedToken(
@@ -565,14 +588,6 @@ impl Parser {
                         ));
                     }
                 };
-
-                let mut args = Vec::new();
-                while !matches!(self.peek().kind, TokenKind::Newline | TokenKind::Colon | TokenKind::Eof) {
-                    args.push(self.parse_expression()?);
-                    if !self.match_token(&TokenKind::Comma) {
-                        break;
-                    }
-                }
 
                 self.expect_statement_terminator("Sub call statement")?;
                 Ok(Statement::Call {
@@ -598,18 +613,33 @@ impl Parser {
         let mut vars = Vec::new();
         loop {
             let name = self.expect_identifier("variable name")?;
-            if self.match_token(&TokenKind::LParen) {
-                let mut paren_depth = 1;
-                while paren_depth > 0 && !self.is_at_end() {
-                    if self.match_token(&TokenKind::LParen) {
-                        paren_depth += 1;
-                    } else if self.match_token(&TokenKind::RParen) {
-                        paren_depth -= 1;
-                    } else {
-                        self.advance();
+            let dimensions = if self.match_token(&TokenKind::LParen) {
+                let mut dims = Vec::new();
+                if !self.check(&TokenKind::RParen) {
+                    loop {
+                        let first_expr = self.parse_expression()?;
+                        if self.match_token(&TokenKind::To) {
+                            let second_expr = self.parse_expression()?;
+                            dims.push(crate::ast::stmt::ArrayDimExpr {
+                                lower: Some(first_expr),
+                                upper: second_expr,
+                            });
+                        } else {
+                            dims.push(crate::ast::stmt::ArrayDimExpr {
+                                lower: None,
+                                upper: first_expr,
+                            });
+                        }
+                        if !self.match_token(&TokenKind::Comma) {
+                            break;
+                        }
                     }
                 }
-            }
+                self.expect(&TokenKind::RParen, "')' closing array dimensions")?;
+                Some(dims)
+            } else {
+                None
+            };
             let type_spec = if self.match_token(&TokenKind::As) {
                 Some(self.parse_type_spec()?)
             } else {
@@ -623,6 +653,7 @@ impl Parser {
 
             vars.push(VariableDeclarator {
                 name,
+                dimensions,
                 type_spec,
                 init_value,
             });

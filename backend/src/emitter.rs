@@ -75,7 +75,13 @@ impl LlvmEmitter {
         out.push_str("declare void @vb6_debug_print_i32(i32)\n");
         out.push_str("declare void @vb6_debug_print_i64(i64)\n");
         out.push_str("declare void @vb6_debug_print_f32(float)\n");
-        out.push_str("declare void @vb6_debug_print_f64(double)\n\n");
+        out.push_str("declare void @vb6_debug_print_f64(double)\n");
+        out.push_str("declare ptr @vb6_array_create(i32, ptr, i32)\n");
+        out.push_str("declare ptr @vb6_array_element_ptr(ptr, i32, ptr)\n");
+        out.push_str("declare i32 @vb6_array_lbound(ptr, i32)\n");
+        out.push_str("declare i32 @vb6_array_ubound(ptr, i32)\n");
+        out.push_str("declare ptr @vb6_array_redim(ptr, i32, ptr, i32, i32)\n");
+        out.push_str("declare void @vb6_array_free(ptr)\n\n");
 
         // Module-level global and static variables
         let mut global_types: HashMap<String, String> = HashMap::new();
@@ -635,6 +641,300 @@ impl LlvmEmitter {
                     }
                 }
             }
+            IrInstruction::ArrayCreate {
+                dest,
+                dims,
+                bounds,
+                elem_type,
+            } => {
+                let bounds_count = dims * 2;
+                out.push_str(&format!(
+                    "  %arr_bounds_{} = alloca [{} x i32], align 4\n",
+                    dest, bounds_count
+                ));
+                for (i, (lb, ub)) in bounds.iter().enumerate() {
+                    let (lb_val, lb_ty) = self.format_operand(lb, local_types, global_types, temp_types, string_constants);
+                    let (ub_val, ub_ty) = self.format_operand(ub, local_types, global_types, temp_types, string_constants);
+
+                    let lb_i32 = if lb_ty != "i32" {
+                        let cast_lb = format!("%arr_lb_cast_{}_{}", dest, i);
+                        out.push_str(&format!("  {} = sext {} {} to i32\n", cast_lb, lb_ty, lb_val));
+                        cast_lb
+                    } else {
+                        lb_val
+                    };
+
+                    let ub_i32 = if ub_ty != "i32" {
+                        let cast_ub = format!("%arr_ub_cast_{}_{}", dest, i);
+                        out.push_str(&format!("  {} = sext {} {} to i32\n", cast_ub, ub_ty, ub_val));
+                        cast_ub
+                    } else {
+                        ub_val
+                    };
+
+                    out.push_str(&format!(
+                        "  %arr_lb_ptr_{}_{} = getelementptr inbounds [{} x i32], ptr %arr_bounds_{}, i32 0, i32 {}\n",
+                        dest, i, bounds_count, dest, i * 2
+                    ));
+                    out.push_str(&format!(
+                        "  store i32 {}, ptr %arr_lb_ptr_{}_{}\n",
+                        lb_i32, dest, i
+                    ));
+
+                    out.push_str(&format!(
+                        "  %arr_ub_ptr_{}_{} = getelementptr inbounds [{} x i32], ptr %arr_bounds_{}, i32 0, i32 {}\n",
+                        dest, i, bounds_count, dest, i * 2 + 1
+                    ));
+                    out.push_str(&format!(
+                        "  store i32 {}, ptr %arr_ub_ptr_{}_{}\n",
+                        ub_i32, dest, i
+                    ));
+                }
+
+                out.push_str(&format!(
+                    "  %arr_bounds_decay_{} = getelementptr inbounds [{} x i32], ptr %arr_bounds_{}, i32 0, i32 0\n",
+                    dest, bounds_count, dest
+                ));
+                let elem_sz = elem_size_bytes(elem_type);
+                out.push_str(&format!(
+                    "  %t{} = call ptr @vb6_array_create(i32 {}, ptr %arr_bounds_decay_{}, i32 {})\n",
+                    dest, dims, dest, elem_sz
+                ));
+                temp_types.insert(*dest, "ptr".to_string());
+            }
+            IrInstruction::ArrayElementPtr {
+                dest,
+                array,
+                indices,
+                ..
+            } => {
+                let (arr_val, _) = self.format_operand(array, local_types, global_types, temp_types, string_constants);
+                let dims = indices.len();
+                out.push_str(&format!(
+                    "  %arr_idx_{} = alloca [{} x i32], align 4\n",
+                    dest, dims
+                ));
+                for (i, idx_op) in indices.iter().enumerate() {
+                    let (idx_val, idx_ty) = self.format_operand(idx_op, local_types, global_types, temp_types, string_constants);
+                    let idx_i32 = if idx_ty != "i32" {
+                        let cast_idx = format!("%arr_idx_cast_{}_{}", dest, i);
+                        out.push_str(&format!("  {} = sext {} {} to i32\n", cast_idx, idx_ty, idx_val));
+                        cast_idx
+                    } else {
+                        idx_val
+                    };
+                    out.push_str(&format!(
+                        "  %arr_idx_slot_{}_{} = getelementptr inbounds [{} x i32], ptr %arr_idx_{}, i32 0, i32 {}\n",
+                        dest, i, dims, dest, i
+                    ));
+                    out.push_str(&format!(
+                        "  store i32 {}, ptr %arr_idx_slot_{}_{}\n",
+                        idx_i32, dest, i
+                    ));
+                }
+                out.push_str(&format!(
+                    "  %arr_idx_decay_{} = getelementptr inbounds [{} x i32], ptr %arr_idx_{}, i32 0, i32 0\n",
+                    dest, dims, dest
+                ));
+                out.push_str(&format!(
+                    "  %t{} = call ptr @vb6_array_element_ptr(ptr {}, i32 {}, ptr %arr_idx_decay_{})\n",
+                    dest, arr_val, dims, dest
+                ));
+                temp_types.insert(*dest, "ptr".to_string());
+            }
+            IrInstruction::ArrayGetElement {
+                dest,
+                array,
+                indices,
+                elem_type,
+            } => {
+                let (arr_val, _) = self.format_operand(array, local_types, global_types, temp_types, string_constants);
+                let dims = indices.len();
+                out.push_str(&format!(
+                    "  %arr_get_idx_{} = alloca [{} x i32], align 4\n",
+                    dest, dims
+                ));
+                for (i, idx_op) in indices.iter().enumerate() {
+                    let (idx_val, idx_ty) = self.format_operand(idx_op, local_types, global_types, temp_types, string_constants);
+                    let idx_i32 = if idx_ty != "i32" {
+                        let cast_idx = format!("%arr_get_cast_{}_{}", dest, i);
+                        out.push_str(&format!("  {} = sext {} {} to i32\n", cast_idx, idx_ty, idx_val));
+                        cast_idx
+                    } else {
+                        idx_val
+                    };
+                    out.push_str(&format!(
+                        "  %arr_get_slot_{}_{} = getelementptr inbounds [{} x i32], ptr %arr_get_idx_{}, i32 0, i32 {}\n",
+                        dest, i, dims, dest, i
+                    ));
+                    out.push_str(&format!(
+                        "  store i32 {}, ptr %arr_get_slot_{}_{}\n",
+                        idx_i32, dest, i
+                    ));
+                }
+                out.push_str(&format!(
+                    "  %arr_get_decay_{} = getelementptr inbounds [{} x i32], ptr %arr_get_idx_{}, i32 0, i32 0\n",
+                    dest, dims, dest
+                ));
+                out.push_str(&format!(
+                    "  %arr_elem_ptr_{} = call ptr @vb6_array_element_ptr(ptr {}, i32 {}, ptr %arr_get_decay_{})\n",
+                    dest, arr_val, dims, dest
+                ));
+                let llvm_ty = Self::llvm_type(elem_type);
+                out.push_str(&format!(
+                    "  %t{} = load {}, ptr %arr_elem_ptr_{}\n",
+                    dest, llvm_ty, dest
+                ));
+                temp_types.insert(*dest, llvm_ty.to_string());
+            }
+            IrInstruction::ArraySetElement {
+                array,
+                indices,
+                value,
+                elem_type,
+            } => {
+                let (arr_val, _) = self.format_operand(array, local_types, global_types, temp_types, string_constants);
+                let dims = indices.len();
+                let set_id = *branch_counter;
+                *branch_counter += 1;
+                out.push_str(&format!(
+                    "  %arr_set_idx_{} = alloca [{} x i32], align 4\n",
+                    set_id, dims
+                ));
+                for (i, idx_op) in indices.iter().enumerate() {
+                    let (idx_val, idx_ty) = self.format_operand(idx_op, local_types, global_types, temp_types, string_constants);
+                    let idx_i32 = if idx_ty != "i32" {
+                        let cast_idx = format!("%arr_set_cast_{}_{}", set_id, i);
+                        out.push_str(&format!("  {} = sext {} {} to i32\n", cast_idx, idx_ty, idx_val));
+                        cast_idx
+                    } else {
+                        idx_val
+                    };
+                    out.push_str(&format!(
+                        "  %arr_set_slot_{}_{} = getelementptr inbounds [{} x i32], ptr %arr_set_idx_{}, i32 0, i32 {}\n",
+                        set_id, i, dims, set_id, i
+                    ));
+                    out.push_str(&format!(
+                        "  store i32 {}, ptr %arr_set_slot_{}_{}\n",
+                        idx_i32, set_id, i
+                    ));
+                }
+                out.push_str(&format!(
+                    "  %arr_set_decay_{} = getelementptr inbounds [{} x i32], ptr %arr_set_idx_{}, i32 0, i32 0\n",
+                    set_id, dims, set_id
+                ));
+                out.push_str(&format!(
+                    "  %arr_set_elem_ptr_{} = call ptr @vb6_array_element_ptr(ptr {}, i32 {}, ptr %arr_set_decay_{})\n",
+                    set_id, arr_val, dims, set_id
+                ));
+                let (val_str, val_ty) = self.format_operand(value, local_types, global_types, temp_types, string_constants);
+                let elem_llvm_ty = Self::llvm_type(elem_type);
+                let final_val = if val_ty != elem_llvm_ty {
+                    let cast_val = format!("%arr_set_val_cast_{}", set_id);
+                    if val_ty == "i32" && elem_llvm_ty == "i64" {
+                        out.push_str(&format!("  {} = sext i32 {} to i64\n", cast_val, val_str));
+                        cast_val
+                    } else if val_ty == "i16" && elem_llvm_ty == "i32" {
+                        out.push_str(&format!("  {} = sext i16 {} to i32\n", cast_val, val_str));
+                        cast_val
+                    } else {
+                        val_str
+                    }
+                } else {
+                    val_str
+                };
+                out.push_str(&format!(
+                    "  store {} {}, ptr %arr_set_elem_ptr_{}\n",
+                    elem_llvm_ty, final_val, set_id
+                ));
+            }
+            IrInstruction::ArrayReDim {
+                dest,
+                array,
+                dims,
+                bounds,
+                elem_type,
+                preserve,
+            } => {
+                let (arr_val, _) = self.format_operand(array, local_types, global_types, temp_types, string_constants);
+                let bounds_count = dims * 2;
+                out.push_str(&format!(
+                    "  %arr_redim_bounds_{} = alloca [{} x i32], align 4\n",
+                    dest, bounds_count
+                ));
+                for (i, (lb, ub)) in bounds.iter().enumerate() {
+                    let (lb_val, lb_ty) = self.format_operand(lb, local_types, global_types, temp_types, string_constants);
+                    let (ub_val, ub_ty) = self.format_operand(ub, local_types, global_types, temp_types, string_constants);
+
+                    let lb_i32 = if lb_ty != "i32" {
+                        let cast_lb = format!("%arr_redim_lb_cast_{}_{}", dest, i);
+                        out.push_str(&format!("  {} = sext {} {} to i32\n", cast_lb, lb_ty, lb_val));
+                        cast_lb
+                    } else {
+                        lb_val
+                    };
+
+                    let ub_i32 = if ub_ty != "i32" {
+                        let cast_ub = format!("%arr_redim_ub_cast_{}_{}", dest, i);
+                        out.push_str(&format!("  {} = sext {} {} to i32\n", cast_ub, ub_ty, ub_val));
+                        cast_ub
+                    } else {
+                        ub_val
+                    };
+
+                    out.push_str(&format!(
+                        "  %arr_redim_lb_ptr_{}_{} = getelementptr inbounds [{} x i32], ptr %arr_redim_bounds_{}, i32 0, i32 {}\n",
+                        dest, i, bounds_count, dest, i * 2
+                    ));
+                    out.push_str(&format!(
+                        "  store i32 {}, ptr %arr_redim_lb_ptr_{}_{}\n",
+                        lb_i32, dest, i
+                    ));
+
+                    out.push_str(&format!(
+                        "  %arr_redim_ub_ptr_{}_{} = getelementptr inbounds [{} x i32], ptr %arr_redim_bounds_{}, i32 0, i32 {}\n",
+                        dest, i, bounds_count, dest, i * 2 + 1
+                    ));
+                    out.push_str(&format!(
+                        "  store i32 {}, ptr %arr_redim_ub_ptr_{}_{}\n",
+                        ub_i32, dest, i
+                    ));
+                }
+
+                out.push_str(&format!(
+                    "  %arr_redim_decay_{} = getelementptr inbounds [{} x i32], ptr %arr_redim_bounds_{}, i32 0, i32 0\n",
+                    dest, bounds_count, dest
+                ));
+                let elem_sz = elem_size_bytes(elem_type);
+                let pres_int = if *preserve { 1 } else { 0 };
+                out.push_str(&format!(
+                    "  %t{} = call ptr @vb6_array_redim(ptr {}, i32 {}, ptr %arr_redim_decay_{}, i32 {}, i32 {})\n",
+                    dest, arr_val, dims, dest, elem_sz, pres_int
+                ));
+                temp_types.insert(*dest, "ptr".to_string());
+            }
+            IrInstruction::ArrayBound {
+                dest,
+                array,
+                dim,
+                is_ubound,
+            } => {
+                let (arr_val, _) = self.format_operand(array, local_types, global_types, temp_types, string_constants);
+                let (dim_val, dim_ty) = self.format_operand(dim, local_types, global_types, temp_types, string_constants);
+                let dim_i32 = if dim_ty != "i32" {
+                    let cast_dim = format!("%arr_bound_dim_cast_{}", dest);
+                    out.push_str(&format!("  {} = sext {} {} to i32\n", cast_dim, dim_ty, dim_val));
+                    cast_dim
+                } else {
+                    dim_val
+                };
+                let func_name = if *is_ubound { "vb6_array_ubound" } else { "vb6_array_lbound" };
+                out.push_str(&format!(
+                    "  %t{} = call i32 @{}(ptr {}, i32 {})\n",
+                    dest, func_name, arr_val, dim_i32
+                ));
+                temp_types.insert(*dest, "i32".to_string());
+            }
             _ => {}
         }
     }
@@ -718,4 +1018,16 @@ fn escape_llvm_string(s: &str) -> (String, usize) {
     out.push_str("\\00\"");
     len += 1;
     (out, len)
+}
+
+fn elem_size_bytes(vb_type: &VbType) -> usize {
+    match vb_type {
+        VbType::Byte => 1,
+        VbType::Integer | VbType::Boolean => 2,
+        VbType::Long | VbType::Enum(_) | VbType::Single => 4,
+        VbType::LongPtr | VbType::LongLong | VbType::Currency | VbType::Double | VbType::Date => 8,
+        VbType::String | VbType::Object | VbType::Array(_) | VbType::UserDefined(_) => 8,
+        VbType::Variant => 24,
+        _ => 8,
+    }
 }

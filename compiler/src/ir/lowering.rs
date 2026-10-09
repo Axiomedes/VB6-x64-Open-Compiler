@@ -35,6 +35,7 @@ pub struct AstToIrLowering {
     current_procedure_name: Option<String>,
     module_globals: HashMap<String, (String, VbType)>,
     globals_list: Vec<IrGlobal>,
+    functions: HashMap<String, (String, VbType)>,
     local_vars: HashMap<String, (String, VbType)>,
     static_vars: HashMap<String, (String, VbType)>,
     temp_types: HashMap<usize, VbType>,
@@ -58,6 +59,7 @@ impl AstToIrLowering {
             current_procedure_name: None,
             module_globals: HashMap::new(),
             globals_list: Vec::new(),
+            functions: HashMap::new(),
             local_vars: HashMap::new(),
             static_vars: HashMap::new(),
             temp_types: HashMap::new(),
@@ -138,25 +140,41 @@ impl AstToIrLowering {
     pub fn lower_source_file(&mut self, file: &SourceFile, module_name: &str) -> IrModule {
         self.module_globals.clear();
         self.globals_list.clear();
+        self.functions.clear();
 
         for decl in &file.declarations {
-            if let Declaration::ModuleVariables(v) = decl {
-                for var in &v.variables {
-                    let vb_type = var
-                        .type_spec
+            match decl {
+                Declaration::ModuleVariables(v) => {
+                    for var in &v.variables {
+                        let mut vb_type = var
+                            .type_spec
+                            .as_ref()
+                            .map(|ts| VbType::from_name(&ts.name))
+                            .unwrap_or(VbType::Variant);
+                        if var.dimensions.is_some() {
+                            vb_type = VbType::Array(Box::new(vb_type));
+                        }
+                        let is_public = v.visibility == Visibility::Public;
+                        let key = var.name.to_ascii_uppercase();
+                        self.module_globals.insert(key, (var.name.clone(), vb_type.clone()));
+                        self.globals_list.push(IrGlobal {
+                            name: var.name.clone(),
+                            vb_type,
+                            is_public,
+                            initial_value: None,
+                        });
+                    }
+                }
+                Declaration::Function(f) => {
+                    let ret_ty = f
+                        .return_type
                         .as_ref()
                         .map(|ts| VbType::from_name(&ts.name))
                         .unwrap_or(VbType::Variant);
-                    let is_public = v.visibility == Visibility::Public;
-                    let key = var.name.to_ascii_uppercase();
-                    self.module_globals.insert(key, (var.name.clone(), vb_type.clone()));
-                    self.globals_list.push(IrGlobal {
-                        name: var.name.clone(),
-                        vb_type,
-                        is_public,
-                        initial_value: None,
-                    });
+                    let key = f.name.to_ascii_uppercase();
+                    self.functions.insert(key, (f.name.clone(), ret_ty));
                 }
+                _ => {}
             }
         }
 
@@ -200,11 +218,16 @@ impl AstToIrLowering {
             .params
             .iter()
             .map(|p| {
-                let ty = p
+                let mut ty = p
                     .param_type
                     .as_ref()
                     .map(|ts| VbType::from_name(&ts.name))
                     .unwrap_or(VbType::Variant);
+                if let Some(ref pt) = p.param_type {
+                    if !pt.array_dimensions.is_empty() {
+                        ty = VbType::Array(Box::new(ty));
+                    }
+                }
                 IrParam {
                     name: p.name.clone(),
                     vb_type: ty,
@@ -274,11 +297,16 @@ impl AstToIrLowering {
             .params
             .iter()
             .map(|p| {
-                let ty = p
+                let mut ty = p
                     .param_type
                     .as_ref()
                     .map(|ts| VbType::from_name(&ts.name))
                     .unwrap_or(VbType::Variant);
+                if let Some(ref pt) = p.param_type {
+                    if !pt.array_dimensions.is_empty() {
+                        ty = VbType::Array(Box::new(ty));
+                    }
+                }
                 IrParam {
                     name: p.name.clone(),
                     vb_type: ty,
@@ -361,11 +389,14 @@ impl AstToIrLowering {
                 match kind {
                     VarDeclKind::Static => {
                         for v in variables {
-                            let vb_type = v
+                            let mut vb_type = v
                                 .type_spec
                                 .as_ref()
                                 .map(|ts| VbType::from_name(&ts.name))
                                 .unwrap_or(VbType::Variant);
+                            if v.dimensions.is_some() {
+                                vb_type = VbType::Array(Box::new(vb_type));
+                            }
                             let proc_name = self.current_procedure_name.as_deref().unwrap_or("proc");
                             let mangled_name = format!("stat_{}_{}", proc_name, v.name);
                             let key = v.name.to_ascii_uppercase();
@@ -378,13 +409,77 @@ impl AstToIrLowering {
                             });
                         }
                     }
+                    VarDeclKind::ReDim | VarDeclKind::ReDimPreserve => {
+                        for v in variables {
+                            let (_prev_target_op, target_ty) = self.resolve_variable(&v.name);
+                            let elem_type = if let Some(ts) = &v.type_spec {
+                                VbType::from_name(&ts.name)
+                            } else {
+                                match &target_ty {
+                                    VbType::Array(elem) => (**elem).clone(),
+                                    _ => VbType::Long,
+                                }
+                            };
+
+                            let key = v.name.to_ascii_uppercase();
+                            let full_arr_ty = VbType::Array(Box::new(elem_type.clone()));
+                            if !self.local_vars.contains_key(&key) && !self.module_globals.contains_key(&key) {
+                                self.local_vars.insert(key.clone(), (v.name.clone(), full_arr_ty.clone()));
+                                let alloc_temp = self.next_temp();
+                                self.emit(IrInstruction::AllocLocal {
+                                    dest: alloc_temp,
+                                    name: v.name.clone(),
+                                    vb_type: full_arr_ty,
+                                });
+                            }
+
+                            let mut bounds = Vec::new();
+                            if let Some(dims) = &v.dimensions {
+                                for dim in dims {
+                                    let lower_op = if let Some(low) = &dim.lower {
+                                        self.lower_expression(low)
+                                    } else {
+                                        Operand::Constant(IrConstant::Int(0, VbType::Long))
+                                    };
+                                    let upper_op = self.lower_expression(&dim.upper);
+                                    bounds.push((lower_op, upper_op));
+                                }
+                            }
+
+                            let (target_op, _) = self.resolve_variable(&v.name);
+                            let arr_ptr_temp = self.next_temp();
+                            self.emit(IrInstruction::Load {
+                                dest: arr_ptr_temp,
+                                src: target_op.clone(),
+                            });
+
+                            let redim_dest = self.next_temp();
+                            let preserve = matches!(kind, VarDeclKind::ReDimPreserve);
+                            self.emit(IrInstruction::ArrayReDim {
+                                dest: redim_dest,
+                                array: Operand::Temp(arr_ptr_temp),
+                                dims: bounds.len(),
+                                bounds,
+                                elem_type,
+                                preserve,
+                            });
+
+                            self.emit(IrInstruction::Store {
+                                dest: target_op,
+                                src: Operand::Temp(redim_dest),
+                            });
+                        }
+                    }
                     _ => {
                         for v in variables {
-                            let vb_type = v
+                            let mut vb_type = v
                                 .type_spec
                                 .as_ref()
                                 .map(|ts| VbType::from_name(&ts.name))
                                 .unwrap_or(VbType::Variant);
+                            if v.dimensions.is_some() {
+                                vb_type = VbType::Array(Box::new(vb_type));
+                            }
 
                             let key = v.name.to_ascii_uppercase();
                             self.local_vars.insert(key, (v.name.clone(), vb_type.clone()));
@@ -396,7 +491,43 @@ impl AstToIrLowering {
                                 vb_type: vb_type.clone(),
                             });
 
-                            if let Some(init) = &v.init_value {
+                            if let Some(dims) = &v.dimensions {
+                                if !dims.is_empty() {
+                                    // Fixed-size array
+                                    let elem_ty = match &vb_type {
+                                        VbType::Array(elem) => (**elem).clone(),
+                                        _ => VbType::Long,
+                                    };
+                                    let mut bounds = Vec::new();
+                                    for dim in dims {
+                                        let lower_op = if let Some(low) = &dim.lower {
+                                            self.lower_expression(low)
+                                        } else {
+                                            Operand::Constant(IrConstant::Int(0, VbType::Long))
+                                        };
+                                        let upper_op = self.lower_expression(&dim.upper);
+                                        bounds.push((lower_op, upper_op));
+                                    }
+                                    let create_dest = self.next_temp();
+                                    self.temp_types.insert(create_dest, vb_type.clone());
+                                    self.emit(IrInstruction::ArrayCreate {
+                                        dest: create_dest,
+                                        dims: bounds.len(),
+                                        bounds,
+                                        elem_type: elem_ty,
+                                    });
+                                    self.emit(IrInstruction::Store {
+                                        dest: Operand::Local(v.name.clone()),
+                                        src: Operand::Temp(create_dest),
+                                    });
+                                } else {
+                                    // Dynamic array: initially null
+                                    self.emit(IrInstruction::Store {
+                                        dest: Operand::Local(v.name.clone()),
+                                        src: Operand::Constant(IrConstant::Null),
+                                    });
+                                }
+                            } else if let Some(init) = &v.init_value {
                                 let init_op = self.lower_expression(init);
                                 self.emit(IrInstruction::Store {
                                     dest: Operand::Local(v.name.clone()),
@@ -414,45 +545,92 @@ impl AstToIrLowering {
                 }
             }
             Statement::Assignment { target, value, .. } => {
-                let (target_op, target_ty) = match target {
-                    Expression::Variable(name) => self.resolve_variable(name),
-                    _ => (Operand::Local("Unknown".to_string()), VbType::Unknown),
-                };
-                let val_op = self.lower_expression(value);
-                let val_ty = self.infer_operand_type(&val_op);
+                if let Expression::IndexAccess { target: arr_target, indices } = target {
+                    let val_op = self.lower_expression(value);
+                    let val_ty = self.infer_operand_type(&val_op);
+                    let arr_op = self.lower_expression(arr_target);
+                    let arr_ty = self.infer_operand_type(&arr_op);
+                    let elem_type = match arr_ty {
+                        VbType::Array(elem) => *elem,
+                        _ => VbType::Long,
+                    };
 
-                let final_val_op = if target_ty != VbType::Unknown
-                    && val_ty != VbType::Unknown
-                    && target_ty != val_ty
-                    && val_ty.can_coerce_to(&target_ty)
-                {
-                    match (&val_op, &target_ty) {
-                        (Operand::Constant(IrConstant::Int(n, _)), VbType::Single | VbType::Double) => {
-                            Operand::Constant(IrConstant::Float(*n as f64))
+                    let final_val_op = if elem_type != VbType::Unknown
+                        && val_ty != VbType::Unknown
+                        && elem_type != val_ty
+                        && val_ty.can_coerce_to(&elem_type)
+                    {
+                        match (&val_op, &elem_type) {
+                            (Operand::Constant(IrConstant::Int(n, _)), VbType::Single | VbType::Double) => {
+                                Operand::Constant(IrConstant::Float(*n as f64))
+                            }
+                            (Operand::Constant(IrConstant::Int(n, _)), VbType::Byte | VbType::Integer | VbType::Long | VbType::Currency) => {
+                                Operand::Constant(IrConstant::Int(*n, elem_type.clone()))
+                            }
+                            _ => {
+                                let cast_temp = self.next_temp();
+                                self.temp_types.insert(cast_temp, elem_type.clone());
+                                self.emit(IrInstruction::Coerce {
+                                    dest: cast_temp,
+                                    src: val_op,
+                                    from_type: val_ty,
+                                    to_type: elem_type.clone(),
+                                });
+                                Operand::Temp(cast_temp)
+                            }
                         }
-                        (Operand::Constant(IrConstant::Int(n, _)), VbType::Byte | VbType::Integer | VbType::Long | VbType::Currency) => {
-                            Operand::Constant(IrConstant::Int(*n, target_ty.clone()))
-                        }
-                        _ => {
-                            let cast_temp = self.next_temp();
-                            self.temp_types.insert(cast_temp, target_ty.clone());
-                            self.emit(IrInstruction::Coerce {
-                                dest: cast_temp,
-                                src: val_op,
-                                from_type: val_ty,
-                                to_type: target_ty,
-                            });
-                            Operand::Temp(cast_temp)
-                        }
-                    }
+                    } else {
+                        val_op
+                    };
+
+                    let idx_ops: Vec<Operand> = indices.iter().map(|idx| self.lower_expression(idx)).collect();
+                    self.emit(IrInstruction::ArraySetElement {
+                        array: arr_op,
+                        indices: idx_ops,
+                        value: final_val_op,
+                        elem_type,
+                    });
                 } else {
-                    val_op
-                };
+                    let (target_op, target_ty) = match target {
+                        Expression::Variable(name) => self.resolve_variable(name),
+                        _ => (Operand::Local("Unknown".to_string()), VbType::Unknown),
+                    };
+                    let val_op = self.lower_expression(value);
+                    let val_ty = self.infer_operand_type(&val_op);
 
-                self.emit(IrInstruction::Store {
-                    dest: target_op,
-                    src: final_val_op,
-                });
+                    let final_val_op = if target_ty != VbType::Unknown
+                        && val_ty != VbType::Unknown
+                        && target_ty != val_ty
+                        && val_ty.can_coerce_to(&target_ty)
+                    {
+                        match (&val_op, &target_ty) {
+                            (Operand::Constant(IrConstant::Int(n, _)), VbType::Single | VbType::Double) => {
+                                Operand::Constant(IrConstant::Float(*n as f64))
+                            }
+                            (Operand::Constant(IrConstant::Int(n, _)), VbType::Byte | VbType::Integer | VbType::Long | VbType::Currency) => {
+                                Operand::Constant(IrConstant::Int(*n, target_ty.clone()))
+                            }
+                            _ => {
+                                let cast_temp = self.next_temp();
+                                self.temp_types.insert(cast_temp, target_ty.clone());
+                                self.emit(IrInstruction::Coerce {
+                                    dest: cast_temp,
+                                    src: val_op,
+                                    from_type: val_ty,
+                                    to_type: target_ty,
+                                });
+                                Operand::Temp(cast_temp)
+                            }
+                        }
+                    } else {
+                        val_op
+                    };
+
+                    self.emit(IrInstruction::Store {
+                        dest: target_op,
+                        src: final_val_op,
+                    });
+                }
             }
             Statement::If {
                 branches,
@@ -1135,30 +1313,45 @@ impl AstToIrLowering {
                         });
                     }
                     BinaryOperator::Add => {
+                        let left_ty = self.infer_operand_type(&left_op);
+                        let right_ty = self.infer_operand_type(&right_op);
+                        let res_ty = crate::types::promote_binary_operator(&left_ty, op, &right_ty)
+                            .unwrap_or(VbType::Long);
+                        self.temp_types.insert(dest, res_ty.clone());
                         self.emit(IrInstruction::BinaryOp {
                             dest,
                             op: IrBinaryOp::Add,
                             left: left_op,
                             right: right_op,
-                            result_type: VbType::Long,
+                            result_type: res_ty,
                         });
                     }
                     BinaryOperator::Subtract => {
+                        let left_ty = self.infer_operand_type(&left_op);
+                        let right_ty = self.infer_operand_type(&right_op);
+                        let res_ty = crate::types::promote_binary_operator(&left_ty, op, &right_ty)
+                            .unwrap_or(VbType::Long);
+                        self.temp_types.insert(dest, res_ty.clone());
                         self.emit(IrInstruction::BinaryOp {
                             dest,
                             op: IrBinaryOp::Sub,
                             left: left_op,
                             right: right_op,
-                            result_type: VbType::Long,
+                            result_type: res_ty,
                         });
                     }
                     BinaryOperator::Multiply => {
+                        let left_ty = self.infer_operand_type(&left_op);
+                        let right_ty = self.infer_operand_type(&right_op);
+                        let res_ty = crate::types::promote_binary_operator(&left_ty, op, &right_ty)
+                            .unwrap_or(VbType::Long);
+                        self.temp_types.insert(dest, res_ty.clone());
                         self.emit(IrInstruction::BinaryOp {
                             dest,
                             op: IrBinaryOp::Mul,
                             left: left_op,
                             right: right_op,
-                            result_type: VbType::Long,
+                            result_type: res_ty,
                         });
                     }
                     BinaryOperator::Divide => {
@@ -1245,6 +1438,63 @@ impl AstToIrLowering {
                 Operand::Temp(dest)
             }
             Expression::Paren(inner) => self.lower_expression(inner),
+            Expression::IndexAccess { target, indices } => {
+                // 1. Check LBound / UBound
+                if let Expression::Variable(name) = &**target {
+                    if name.eq_ignore_ascii_case("LBound") || name.eq_ignore_ascii_case("UBound") {
+                        let is_ubound = name.eq_ignore_ascii_case("UBound");
+                        let array_op = self.lower_expression(&indices[0]);
+                        let dim_op = if indices.len() > 1 {
+                            self.lower_expression(&indices[1])
+                        } else {
+                            Operand::Constant(IrConstant::Int(1, VbType::Long))
+                        };
+                        let dest = self.next_temp();
+                        self.temp_types.insert(dest, VbType::Long);
+                        self.emit(IrInstruction::ArrayBound {
+                            dest,
+                            array: array_op,
+                            dim: dim_op,
+                            is_ubound,
+                        });
+                        return Operand::Temp(dest);
+                    }
+                }
+
+                // 2. Check function call
+                if let Expression::Variable(name) = &**target {
+                    let key = name.to_ascii_uppercase();
+                    if let Some((func_real_name, ret_ty)) = self.functions.get(&key).cloned() {
+                        let args_ops: Vec<Operand> = indices.iter().map(|arg| self.lower_expression(arg)).collect();
+                        let dest = self.next_temp();
+                        self.temp_types.insert(dest, ret_ty.clone());
+                        self.emit(IrInstruction::Call {
+                            dest: Some(dest),
+                            name: func_real_name,
+                            args: args_ops,
+                        });
+                        return Operand::Temp(dest);
+                    }
+                }
+
+                // 3. Array element indexing
+                let arr_op = self.lower_expression(target);
+                let arr_ty = self.infer_operand_type(&arr_op);
+                let elem_type = match arr_ty {
+                    VbType::Array(elem) => *elem,
+                    _ => VbType::Long,
+                };
+                let idx_ops: Vec<Operand> = indices.iter().map(|idx| self.lower_expression(idx)).collect();
+                let dest = self.next_temp();
+                self.temp_types.insert(dest, elem_type.clone());
+                self.emit(IrInstruction::ArrayGetElement {
+                    dest,
+                    array: arr_op,
+                    indices: idx_ops,
+                    elem_type,
+                });
+                Operand::Temp(dest)
+            }
             _ => Operand::Constant(IrConstant::Null),
         }
     }
