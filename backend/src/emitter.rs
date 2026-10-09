@@ -238,12 +238,30 @@ impl LlvmEmitter {
             }
         }
 
+        let mut branch_counter = 0usize;
+
         // Emit blocks
         for (block_idx, block) in func.blocks.iter().enumerate() {
             out.push_str(&format!("{}:\n", block.label));
 
-            // In entry block, store ByVal arguments into locals if matching
+            // In entry block, emit all allocas first so they dominate the whole function
             if block_idx == 0 {
+                let mut emitted_allocas = std::collections::HashSet::new();
+                for b in &func.blocks {
+                    for inst in &b.instructions {
+                        if let IrInstruction::AllocLocal { name, vb_type, .. } = inst {
+                            if emitted_allocas.insert(name.to_ascii_uppercase()) {
+                                let llvm_ty = Self::llvm_type(vb_type);
+                                let align = vb_type.alignment(true).max(1);
+                                out.push_str(&format!(
+                                    "  %\"local_{}\" = alloca {}, align {}\n",
+                                    name, llvm_ty, align
+                                ));
+                            }
+                        }
+                    }
+                }
+
                 for p in &func.params {
                     let key = p.name.to_ascii_uppercase();
                     if let Some((llvm_ty, _)) = local_types.get(&key) {
@@ -272,7 +290,17 @@ impl LlvmEmitter {
                     &mut temp_types,
                     string_constants,
                     &func.return_type,
+                    &mut branch_counter,
                 );
+                if matches!(
+                    inst,
+                    IrInstruction::Branch { .. }
+                        | IrInstruction::BranchIf { .. }
+                        | IrInstruction::Return { .. }
+                        | IrInstruction::Resume { .. }
+                ) {
+                    break;
+                }
             }
 
             // Ensure basic block ends with a terminator (br or ret)
@@ -303,19 +331,11 @@ impl LlvmEmitter {
         temp_types: &mut HashMap<usize, String>,
         string_constants: &HashMap<String, String>,
         func_ret_type: &Option<VbType>,
+        branch_counter: &mut usize,
     ) {
         match inst {
-            IrInstruction::AllocLocal {
-                name,
-                vb_type,
-                ..
-            } => {
-                let llvm_ty = Self::llvm_type(vb_type);
-                let align = vb_type.alignment(true).max(1);
-                out.push_str(&format!(
-                    "  %\"local_{}\" = alloca {}, align {}\n",
-                    name, llvm_ty, align
-                ));
+            IrInstruction::AllocLocal { .. } => {
+                // Pre-allocated in the function entry block.
             }
             IrInstruction::Load { dest, src } => {
                 let (src_val, src_ty) = self.format_operand(src, local_types, global_types, temp_types, string_constants);
@@ -448,13 +468,14 @@ impl LlvmEmitter {
                 false_target,
             } => {
                 let (cond_val, cond_ty) = self.format_operand(condition, local_types, global_types, temp_types, string_constants);
+                *branch_counter += 1;
                 out.push_str(&format!(
                     "  %cond_bool_{} = icmp ne {} {}, 0\n",
-                    true_target, cond_ty, cond_val
+                    *branch_counter, cond_ty, cond_val
                 ));
                 out.push_str(&format!(
                     "  br i1 %cond_bool_{}, label %{}, label %{}\n",
-                    true_target, true_target, false_target
+                    *branch_counter, true_target, false_target
                 ));
             }
             IrInstruction::Call { dest, name, args } => {
@@ -672,17 +693,15 @@ impl LlvmEmitter {
 }
 
 fn block_ends_with_terminator(block: &BasicBlock) -> bool {
-    if let Some(last) = block.instructions.last() {
+    block.instructions.iter().any(|inst| {
         matches!(
-            last,
+            inst,
             IrInstruction::Branch { .. }
                 | IrInstruction::BranchIf { .. }
                 | IrInstruction::Return { .. }
                 | IrInstruction::Resume { .. }
         )
-    } else {
-        false
-    }
+    })
 }
 
 fn escape_llvm_string(s: &str) -> (String, usize) {

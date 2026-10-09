@@ -38,6 +38,8 @@ pub struct AstToIrLowering {
     local_vars: HashMap<String, (String, VbType)>,
     static_vars: HashMap<String, (String, VbType)>,
     temp_types: HashMap<usize, VbType>,
+    for_exit_stack: Vec<String>,
+    do_exit_stack: Vec<String>,
 }
 
 impl Default for AstToIrLowering {
@@ -59,6 +61,8 @@ impl AstToIrLowering {
             local_vars: HashMap::new(),
             static_vars: HashMap::new(),
             temp_types: HashMap::new(),
+            for_exit_stack: Vec::new(),
+            do_exit_stack: Vec::new(),
         }
     }
 
@@ -185,6 +189,8 @@ impl AstToIrLowering {
         self.local_vars.clear();
         self.static_vars.clear();
         self.temp_types.clear();
+        self.for_exit_stack.clear();
+        self.do_exit_stack.clear();
         self.current_procedure_name = Some(sub.name.clone());
 
         let entry_idx = self.create_block("entry");
@@ -257,6 +263,8 @@ impl AstToIrLowering {
         self.local_vars.clear();
         self.static_vars.clear();
         self.temp_types.clear();
+        self.for_exit_stack.clear();
+        self.do_exit_stack.clear();
         self.current_procedure_name = Some(func.name.clone());
 
         let entry_idx = self.create_block("entry");
@@ -505,7 +513,7 @@ impl AstToIrLowering {
                 body,
                 ..
             } => {
-                let (counter_target, _) = self.resolve_variable(counter);
+                let (counter_target, counter_ty) = self.resolve_variable(counter);
                 // Initialize counter
                 let start_op = self.lower_expression(start);
                 self.emit(IrInstruction::Store {
@@ -513,9 +521,18 @@ impl AstToIrLowering {
                     src: start_op,
                 });
 
+                let end_op = self.lower_expression(end);
+                let step_op = if let Some(st) = step {
+                    self.lower_expression(st)
+                } else {
+                    Operand::Constant(IrConstant::Int(1, counter_ty.clone()))
+                };
+
                 let header_label = self.next_label("for_header");
                 let body_label = self.next_label("for_body");
                 let exit_label = self.next_label("for_exit");
+
+                self.for_exit_stack.push(exit_label.clone());
 
                 self.emit(IrInstruction::Branch {
                     target: header_label.clone(),
@@ -531,20 +548,90 @@ impl AstToIrLowering {
                     src: counter_target.clone(),
                 });
 
-                let end_op = self.lower_expression(end);
-                let cmp_temp = self.next_temp();
-                self.emit(IrInstruction::Compare {
-                    dest: cmp_temp,
-                    op: IrCompareOp::LessThanOrEqual,
-                    left: Operand::Temp(counter_load_temp),
-                    right: end_op,
-                });
+                // Check step direction (positive vs negative)
+                let is_static_negative = match &step_op {
+                    Operand::Constant(IrConstant::Int(val, _)) if *val < 0 => Some(true),
+                    Operand::Constant(IrConstant::Int(val, _)) if *val >= 0 => Some(false),
+                    _ => None,
+                };
 
-                self.emit(IrInstruction::BranchIf {
-                    condition: Operand::Temp(cmp_temp),
-                    true_target: body_label.clone(),
-                    false_target: exit_label.clone(),
-                });
+                match is_static_negative {
+                    Some(true) => {
+                        let cmp_temp = self.next_temp();
+                        self.emit(IrInstruction::Compare {
+                            dest: cmp_temp,
+                            op: IrCompareOp::GreaterThanOrEqual,
+                            left: Operand::Temp(counter_load_temp),
+                            right: end_op,
+                        });
+                        self.emit(IrInstruction::BranchIf {
+                            condition: Operand::Temp(cmp_temp),
+                            true_target: body_label.clone(),
+                            false_target: exit_label.clone(),
+                        });
+                    }
+                    Some(false) => {
+                        let cmp_temp = self.next_temp();
+                        self.emit(IrInstruction::Compare {
+                            dest: cmp_temp,
+                            op: IrCompareOp::LessThanOrEqual,
+                            left: Operand::Temp(counter_load_temp),
+                            right: end_op,
+                        });
+                        self.emit(IrInstruction::BranchIf {
+                            condition: Operand::Temp(cmp_temp),
+                            true_target: body_label.clone(),
+                            false_target: exit_label.clone(),
+                        });
+                    }
+                    None => {
+                        // Dynamic step check
+                        let pos_label = self.next_label("for_pos");
+                        let neg_label = self.next_label("for_neg");
+                        let is_pos_temp = self.next_temp();
+                        self.emit(IrInstruction::Compare {
+                            dest: is_pos_temp,
+                            op: IrCompareOp::GreaterThanOrEqual,
+                            left: step_op.clone(),
+                            right: Operand::Constant(IrConstant::Int(0, counter_ty.clone())),
+                        });
+                        self.emit(IrInstruction::BranchIf {
+                            condition: Operand::Temp(is_pos_temp),
+                            true_target: pos_label.clone(),
+                            false_target: neg_label.clone(),
+                        });
+
+                        let pos_idx = self.create_block(&pos_label);
+                        self.switch_to_block(pos_idx);
+                        let cmp_pos = self.next_temp();
+                        self.emit(IrInstruction::Compare {
+                            dest: cmp_pos,
+                            op: IrCompareOp::LessThanOrEqual,
+                            left: Operand::Temp(counter_load_temp),
+                            right: end_op.clone(),
+                        });
+                        self.emit(IrInstruction::BranchIf {
+                            condition: Operand::Temp(cmp_pos),
+                            true_target: body_label.clone(),
+                            false_target: exit_label.clone(),
+                        });
+
+                        let neg_idx = self.create_block(&neg_label);
+                        self.switch_to_block(neg_idx);
+                        let cmp_neg = self.next_temp();
+                        self.emit(IrInstruction::Compare {
+                            dest: cmp_neg,
+                            op: IrCompareOp::GreaterThanOrEqual,
+                            left: Operand::Temp(counter_load_temp),
+                            right: end_op,
+                        });
+                        self.emit(IrInstruction::BranchIf {
+                            condition: Operand::Temp(cmp_neg),
+                            true_target: body_label.clone(),
+                            false_target: exit_label.clone(),
+                        });
+                    }
+                }
 
                 // Body block
                 let body_idx = self.create_block(&body_label);
@@ -554,12 +641,6 @@ impl AstToIrLowering {
                 }
 
                 // Step increment
-                let step_op = if let Some(st) = step {
-                    self.lower_expression(st)
-                } else {
-                    Operand::Constant(IrConstant::Int(1, VbType::Long))
-                };
-
                 let curr_val_temp = self.next_temp();
                 self.emit(IrInstruction::Load {
                     dest: curr_val_temp,
@@ -572,7 +653,7 @@ impl AstToIrLowering {
                     op: IrBinaryOp::Add,
                     left: Operand::Temp(curr_val_temp),
                     right: step_op,
-                    result_type: VbType::Long,
+                    result_type: counter_ty,
                 });
 
                 self.emit(IrInstruction::Store {
@@ -583,6 +664,8 @@ impl AstToIrLowering {
                 self.emit(IrInstruction::Branch {
                     target: header_label,
                 });
+
+                self.for_exit_stack.pop();
 
                 // Exit block
                 let exit_idx = self.create_block(&exit_label);
@@ -597,6 +680,8 @@ impl AstToIrLowering {
                 let header_label = self.next_label("loop_header");
                 let body_label = self.next_label("loop_body");
                 let exit_label = self.next_label("loop_exit");
+
+                self.do_exit_stack.push(exit_label.clone());
 
                 self.emit(IrInstruction::Branch {
                     target: header_label.clone(),
@@ -622,6 +707,10 @@ impl AstToIrLowering {
                             condition: cond_op,
                             true_target: true_t,
                             false_target: false_t,
+                        });
+                    } else {
+                        self.emit(IrInstruction::Branch {
+                            target: body_label.clone(),
                         });
                     }
                 } else {
@@ -665,9 +754,237 @@ impl AstToIrLowering {
                     });
                 }
 
+                self.do_exit_stack.pop();
+
                 let exit_idx = self.create_block(&exit_label);
                 self.switch_to_block(exit_idx);
             }
+            Statement::WhileWend {
+                condition,
+                body,
+                ..
+            } => {
+                let header_label = self.next_label("while_header");
+                let body_label = self.next_label("while_body");
+                let exit_label = self.next_label("while_exit");
+
+                self.emit(IrInstruction::Branch {
+                    target: header_label.clone(),
+                });
+
+                let header_idx = self.create_block(&header_label);
+                self.switch_to_block(header_idx);
+
+                let cond_op = self.lower_expression(condition);
+                self.emit(IrInstruction::BranchIf {
+                    condition: cond_op,
+                    true_target: body_label.clone(),
+                    false_target: exit_label.clone(),
+                });
+
+                let body_idx = self.create_block(&body_label);
+                self.switch_to_block(body_idx);
+                for s in body {
+                    self.lower_statement(s);
+                }
+
+                self.emit(IrInstruction::Branch {
+                    target: header_label,
+                });
+
+                let exit_idx = self.create_block(&exit_label);
+                self.switch_to_block(exit_idx);
+            }
+            Statement::SelectCase {
+                expression,
+                cases,
+                else_case,
+                ..
+            } => {
+                let test_op = self.lower_expression(expression);
+                let test_ty = self.infer_operand_type(&test_op);
+                let select_val_name = format!("__select_val_{}", self.temp_counter);
+                self.temp_counter += 1;
+                self.local_vars.insert(
+                    select_val_name.to_ascii_uppercase(),
+                    (select_val_name.clone(), test_ty.clone()),
+                );
+                let select_dest = self.next_temp();
+                self.emit(IrInstruction::AllocLocal {
+                    dest: select_dest,
+                    name: select_val_name.clone(),
+                    vb_type: test_ty.clone(),
+                });
+                self.emit(IrInstruction::Store {
+                    dest: Operand::Local(select_val_name.clone()),
+                    src: test_op,
+                });
+
+                let exit_label = self.next_label("select_exit");
+
+                for case_clause in cases {
+                    let case_body_label = self.next_label("case_body");
+                    let next_case_label = self.next_label("case_next");
+
+                    for (val_idx, case_val) in case_clause.values.iter().enumerate() {
+                        let is_last_val = val_idx + 1 == case_clause.values.len();
+                        let on_fail_label = if is_last_val {
+                            next_case_label.clone()
+                        } else {
+                            self.next_label("case_val_next")
+                        };
+
+                        let curr_test = self.next_temp();
+                        self.emit(IrInstruction::Load {
+                            dest: curr_test,
+                            src: Operand::Local(select_val_name.clone()),
+                        });
+
+                        match case_val {
+                            CaseValue::Exact(e) => {
+                                let val_op = self.lower_expression(e);
+                                let cmp_temp = self.next_temp();
+                                self.emit(IrInstruction::Compare {
+                                    dest: cmp_temp,
+                                    op: IrCompareOp::Equal,
+                                    left: Operand::Temp(curr_test),
+                                    right: val_op,
+                                });
+                                self.emit(IrInstruction::BranchIf {
+                                    condition: Operand::Temp(cmp_temp),
+                                    true_target: case_body_label.clone(),
+                                    false_target: on_fail_label.clone(),
+                                });
+                            }
+                            CaseValue::Comparison(bin_op, e) => {
+                                let val_op = self.lower_expression(e);
+                                let ir_op = match bin_op {
+                                    BinaryOperator::Equal => IrCompareOp::Equal,
+                                    BinaryOperator::NotEqual => IrCompareOp::NotEqual,
+                                    BinaryOperator::LessThan => IrCompareOp::LessThan,
+                                    BinaryOperator::LessThanOrEqual => IrCompareOp::LessThanOrEqual,
+                                    BinaryOperator::GreaterThan => IrCompareOp::GreaterThan,
+                                    BinaryOperator::GreaterThanOrEqual => IrCompareOp::GreaterThanOrEqual,
+                                    _ => IrCompareOp::Equal,
+                                };
+                                let cmp_temp = self.next_temp();
+                                self.emit(IrInstruction::Compare {
+                                    dest: cmp_temp,
+                                    op: ir_op,
+                                    left: Operand::Temp(curr_test),
+                                    right: val_op,
+                                });
+                                self.emit(IrInstruction::BranchIf {
+                                    condition: Operand::Temp(cmp_temp),
+                                    true_target: case_body_label.clone(),
+                                    false_target: on_fail_label.clone(),
+                                });
+                            }
+                            CaseValue::Range(low_e, high_e) => {
+                                let low_op = self.lower_expression(low_e);
+                                let high_op = self.lower_expression(high_e);
+                                let low_cmp = self.next_temp();
+                                self.emit(IrInstruction::Compare {
+                                    dest: low_cmp,
+                                    op: IrCompareOp::GreaterThanOrEqual,
+                                    left: Operand::Temp(curr_test),
+                                    right: low_op,
+                                });
+                                let check_high_label = self.next_label("range_check_high");
+                                self.emit(IrInstruction::BranchIf {
+                                    condition: Operand::Temp(low_cmp),
+                                    true_target: check_high_label.clone(),
+                                    false_target: on_fail_label.clone(),
+                                });
+
+                                let check_high_idx = self.create_block(&check_high_label);
+                                self.switch_to_block(check_high_idx);
+
+                                let high_test = self.next_temp();
+                                self.emit(IrInstruction::Load {
+                                    dest: high_test,
+                                    src: Operand::Local(select_val_name.clone()),
+                                });
+                                let high_cmp = self.next_temp();
+                                self.emit(IrInstruction::Compare {
+                                    dest: high_cmp,
+                                    op: IrCompareOp::LessThanOrEqual,
+                                    left: Operand::Temp(high_test),
+                                    right: high_op,
+                                });
+                                self.emit(IrInstruction::BranchIf {
+                                    condition: Operand::Temp(high_cmp),
+                                    true_target: case_body_label.clone(),
+                                    false_target: on_fail_label.clone(),
+                                });
+                            }
+                        }
+
+                        if !is_last_val {
+                            let next_val_idx = self.create_block(&on_fail_label);
+                            self.switch_to_block(next_val_idx);
+                        }
+                    }
+
+                    // Body of this case clause
+                    let body_idx = self.create_block(&case_body_label);
+                    self.switch_to_block(body_idx);
+                    for s in &case_clause.body {
+                        self.lower_statement(s);
+                    }
+                    self.emit(IrInstruction::Branch {
+                        target: exit_label.clone(),
+                    });
+
+                    // Switch to next case
+                    let next_case_idx = self.create_block(&next_case_label);
+                    self.switch_to_block(next_case_idx);
+                }
+
+                if let Some(eb) = else_case {
+                    for s in eb {
+                        self.lower_statement(s);
+                    }
+                    self.emit(IrInstruction::Branch {
+                        target: exit_label.clone(),
+                    });
+                } else {
+                    self.emit(IrInstruction::Branch {
+                        target: exit_label.clone(),
+                    });
+                }
+
+                let exit_idx = self.create_block(&exit_label);
+                self.switch_to_block(exit_idx);
+            }
+            Statement::Exit { target, .. } => match target {
+                ExitTarget::Sub | ExitTarget::Function | ExitTarget::Property => {
+                    self.emit(IrInstruction::Return { value: None });
+                    let dead_label = self.next_label("after_exit_proc");
+                    let dead_idx = self.create_block(&dead_label);
+                    self.switch_to_block(dead_idx);
+                }
+                ExitTarget::For => {
+                    if let Some(target_label) = self.for_exit_stack.last() {
+                        self.emit(IrInstruction::Branch {
+                            target: target_label.clone(),
+                        });
+                        let dead_label = self.next_label("after_exit_for");
+                        let dead_idx = self.create_block(&dead_label);
+                        self.switch_to_block(dead_idx);
+                    }
+                }
+                ExitTarget::Do => {
+                    if let Some(target_label) = self.do_exit_stack.last() {
+                        self.emit(IrInstruction::Branch {
+                            target: target_label.clone(),
+                        });
+                        let dead_label = self.next_label("after_exit_do");
+                        let dead_idx = self.create_block(&dead_label);
+                        self.switch_to_block(dead_idx);
+                    }
+                }
+            },
             Statement::Call {
                 name, arguments, ..
             } => {
@@ -717,12 +1034,6 @@ impl AstToIrLowering {
                 ResumeAction::Current => {
                     self.emit(IrInstruction::Resume { target: None });
                 }
-            },
-            Statement::Exit { target, .. } => match target {
-                ExitTarget::Sub | ExitTarget::Function | ExitTarget::Property => {
-                    self.emit(IrInstruction::Return { value: None });
-                }
-                _ => {}
             },
             Statement::GoTo { label, .. } => {
                 self.emit(IrInstruction::Branch {

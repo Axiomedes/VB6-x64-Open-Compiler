@@ -660,6 +660,7 @@ impl Parser {
         self.expect_statement_terminator("If header")?;
 
         let mut branches = Vec::new();
+        let mut current_cond = condition;
         let mut current_body = Vec::new();
         let mut else_branch = None;
 
@@ -671,37 +672,21 @@ impl Parser {
 
             if self.match_token(&TokenKind::ElseIf) {
                 branches.push(IfBranch {
-                    condition: condition.clone(),
+                    condition: current_cond,
                     body: current_body,
                 });
                 current_body = Vec::new();
-                let next_cond = self.parse_expression()?;
+                current_cond = self.parse_expression()?;
                 self.expect(&TokenKind::Then, "'Then' after ElseIf condition")?;
                 self.expect_statement_terminator("ElseIf header")?;
-                // Parse next branch
-                while !self.is_at_end() {
-                    self.skip_newlines_and_colons();
-                    if self.check(&TokenKind::ElseIf) || self.check(&TokenKind::Else) || (self.check(&TokenKind::End) && self.check_next(&TokenKind::If)) {
-                        break;
-                    }
-                    current_body.push(self.parse_statement()?);
-                }
-                branches.push(IfBranch {
-                    condition: next_cond,
-                    body: current_body,
-                });
-                current_body = Vec::new();
                 continue;
             }
 
             if self.match_token(&TokenKind::Else) {
-                if branches.is_empty() {
-                    branches.push(IfBranch {
-                        condition: condition.clone(),
-                        body: current_body,
-                    });
-                    current_body = Vec::new();
-                }
+                branches.push(IfBranch {
+                    condition: current_cond,
+                    body: current_body,
+                });
                 self.expect_statement_terminator("Else header")?;
                 let mut else_stmts = Vec::new();
                 while !self.is_at_end() {
@@ -716,17 +701,14 @@ impl Parser {
             }
 
             if self.check(&TokenKind::End) && self.check_next(&TokenKind::If) {
+                branches.push(IfBranch {
+                    condition: current_cond,
+                    body: current_body,
+                });
                 break;
             }
 
             current_body.push(self.parse_statement()?);
-        }
-
-        if branches.is_empty() {
-            branches.push(IfBranch {
-                condition,
-                body: current_body,
-            });
         }
 
         self.expect(&TokenKind::End, "'End'")?;

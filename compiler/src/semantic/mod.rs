@@ -68,12 +68,19 @@ pub enum SemanticError {
     ObjectRequired {
         span: Span,
     },
+    #[error("Exit {target} not within {target} loop at line {}, col {}", span.start_line, span.start_col)]
+    InvalidExitStatement {
+        target: String,
+        span: Span,
+    },
 }
 
 pub struct SemanticAnalyzer {
     pub symbol_table: SymbolTable,
     pub errors: Vec<SemanticError>,
     pub option_explicit: bool,
+    loop_depth_for: usize,
+    loop_depth_do: usize,
 }
 
 impl Default for SemanticAnalyzer {
@@ -88,6 +95,8 @@ impl SemanticAnalyzer {
             symbol_table: SymbolTable::new(),
             errors: Vec::new(),
             option_explicit: false,
+            loop_depth_for: 0,
+            loop_depth_do: 0,
         }
     }
 
@@ -500,9 +509,11 @@ impl SemanticAnalyzer {
                     let _ = self.infer_expression_type(st);
                 }
 
+                self.loop_depth_for += 1;
                 for s in body {
                     self.analyze_statement(s);
                 }
+                self.loop_depth_for -= 1;
             }
             Statement::DoLoop {
                 condition, body, ..
@@ -514,9 +525,11 @@ impl SemanticAnalyzer {
                         }
                     }
                 }
+                self.loop_depth_do += 1;
                 for s in body {
                     self.analyze_statement(s);
                 }
+                self.loop_depth_do -= 1;
             }
             Statement::WhileWend {
                 condition, body, ..
@@ -526,6 +539,57 @@ impl SemanticAnalyzer {
                     self.analyze_statement(s);
                 }
             }
+            Statement::SelectCase {
+                expression,
+                cases,
+                else_case,
+                ..
+            } => {
+                let _ = self.infer_expression_type(expression);
+                for c in cases {
+                    for v in &c.values {
+                        match v {
+                            crate::ast::stmt::CaseValue::Exact(e) => {
+                                let _ = self.infer_expression_type(e);
+                            }
+                            crate::ast::stmt::CaseValue::Range(low, high) => {
+                                let _ = self.infer_expression_type(low);
+                                let _ = self.infer_expression_type(high);
+                            }
+                            crate::ast::stmt::CaseValue::Comparison(_, e) => {
+                                let _ = self.infer_expression_type(e);
+                            }
+                        }
+                    }
+                    for s in &c.body {
+                        self.analyze_statement(s);
+                    }
+                }
+                if let Some(eb) = else_case {
+                    for s in eb {
+                        self.analyze_statement(s);
+                    }
+                }
+            }
+            Statement::Exit { target, span } => match target {
+                crate::ast::stmt::ExitTarget::For => {
+                    if self.loop_depth_for == 0 {
+                        self.errors.push(SemanticError::InvalidExitStatement {
+                            target: "For".to_string(),
+                            span: *span,
+                        });
+                    }
+                }
+                crate::ast::stmt::ExitTarget::Do => {
+                    if self.loop_depth_do == 0 {
+                        self.errors.push(SemanticError::InvalidExitStatement {
+                            target: "Do".to_string(),
+                            span: *span,
+                        });
+                    }
+                }
+                _ => {}
+            },
             Statement::Call {
                 name,
                 arguments,
