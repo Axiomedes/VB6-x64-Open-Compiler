@@ -58,6 +58,11 @@ pub fn check_coercion(from: &VbType, target: &VbType) -> CoercionKind {
         return CoercionKind::Exact;
     }
 
+    // Numeric / Boolean / Date -> String (implicit string conversion)
+    if (from.is_numeric() || *from == VbType::Boolean || *from == VbType::Date) && *target == VbType::String {
+        return CoercionKind::Widening;
+    }
+
     CoercionKind::Incompatible
 }
 

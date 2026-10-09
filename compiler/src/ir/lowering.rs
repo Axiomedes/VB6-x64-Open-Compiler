@@ -107,6 +107,23 @@ impl AstToIrLowering {
         }
     }
 
+    pub fn coerce_to_string(&mut self, op: Operand) -> Operand {
+        let ty = self.infer_operand_type(&op);
+        if ty != VbType::String {
+            let dest = self.next_temp();
+            self.temp_types.insert(dest, VbType::String);
+            self.emit(IrInstruction::Coerce {
+                dest,
+                src: op,
+                from_type: ty,
+                to_type: VbType::String,
+            });
+            Operand::Temp(dest)
+        } else {
+            op
+        }
+    }
+
     fn next_temp(&mut self) -> usize {
         let t = self.temp_counter;
         self.temp_counter += 1;
@@ -1174,6 +1191,7 @@ impl AstToIrLowering {
                     dest: None,
                     name: name.clone(),
                     args: args_ops,
+                    return_type: None,
                 });
             }
             Statement::DebugPrint { arguments, .. } => {
@@ -1258,73 +1276,68 @@ impl AstToIrLowering {
 
                 match op {
                     BinaryOperator::Concat => {
+                        let l_op = self.coerce_to_string(left_op);
+                        let r_op = self.coerce_to_string(right_op);
+                        self.temp_types.insert(dest, VbType::String);
                         self.emit(IrInstruction::StringConcat {
                             dest,
-                            left: left_op,
-                            right: right_op,
+                            left: l_op,
+                            right: r_op,
                         });
                     }
-                    BinaryOperator::Equal => {
+                    BinaryOperator::Equal
+                    | BinaryOperator::NotEqual
+                    | BinaryOperator::LessThan
+                    | BinaryOperator::LessThanOrEqual
+                    | BinaryOperator::GreaterThan
+                    | BinaryOperator::GreaterThanOrEqual => {
+                        let left_ty = self.infer_operand_type(&left_op);
+                        let right_ty = self.infer_operand_type(&right_op);
+                        let (l_op, r_op) = if left_ty == VbType::String || right_ty == VbType::String {
+                            (self.coerce_to_string(left_op), self.coerce_to_string(right_op))
+                        } else {
+                            (left_op, right_op)
+                        };
+                        let cmp_op = match op {
+                            BinaryOperator::Equal => IrCompareOp::Equal,
+                            BinaryOperator::NotEqual => IrCompareOp::NotEqual,
+                            BinaryOperator::LessThan => IrCompareOp::LessThan,
+                            BinaryOperator::LessThanOrEqual => IrCompareOp::LessThanOrEqual,
+                            BinaryOperator::GreaterThan => IrCompareOp::GreaterThan,
+                            BinaryOperator::GreaterThanOrEqual => IrCompareOp::GreaterThanOrEqual,
+                            _ => unreachable!(),
+                        };
                         self.emit(IrInstruction::Compare {
                             dest,
-                            op: IrCompareOp::Equal,
-                            left: left_op,
-                            right: right_op,
-                        });
-                    }
-                    BinaryOperator::NotEqual => {
-                        self.emit(IrInstruction::Compare {
-                            dest,
-                            op: IrCompareOp::NotEqual,
-                            left: left_op,
-                            right: right_op,
-                        });
-                    }
-                    BinaryOperator::LessThan => {
-                        self.emit(IrInstruction::Compare {
-                            dest,
-                            op: IrCompareOp::LessThan,
-                            left: left_op,
-                            right: right_op,
-                        });
-                    }
-                    BinaryOperator::LessThanOrEqual => {
-                        self.emit(IrInstruction::Compare {
-                            dest,
-                            op: IrCompareOp::LessThanOrEqual,
-                            left: left_op,
-                            right: right_op,
-                        });
-                    }
-                    BinaryOperator::GreaterThan => {
-                        self.emit(IrInstruction::Compare {
-                            dest,
-                            op: IrCompareOp::GreaterThan,
-                            left: left_op,
-                            right: right_op,
-                        });
-                    }
-                    BinaryOperator::GreaterThanOrEqual => {
-                        self.emit(IrInstruction::Compare {
-                            dest,
-                            op: IrCompareOp::GreaterThanOrEqual,
-                            left: left_op,
-                            right: right_op,
+                            op: cmp_op,
+                            left: l_op,
+                            right: r_op,
                         });
                     }
                     BinaryOperator::Add => {
                         let left_ty = self.infer_operand_type(&left_op);
                         let right_ty = self.infer_operand_type(&right_op);
-                        let res_ty = crate::types::promote_binary_operator(&left_ty, op, &right_ty)
-                            .unwrap_or(VbType::Long);
-                        self.temp_types.insert(dest, res_ty.clone());
-                        self.emit(IrInstruction::BinaryOp {
-                            dest,
-                            op: IrBinaryOp::Add,
-                            left: left_op,
-                            right: right_op,
-                            result_type: res_ty,
-                        });
+                        if left_ty == VbType::String || right_ty == VbType::String {
+                            let l_op = self.coerce_to_string(left_op);
+                            let r_op = self.coerce_to_string(right_op);
+                            self.temp_types.insert(dest, VbType::String);
+                            self.emit(IrInstruction::StringConcat {
+                                dest,
+                                left: l_op,
+                                right: r_op,
+                            });
+                        } else {
+                            let res_ty = crate::types::promote_binary_operator(&left_ty, op, &right_ty)
+                                .unwrap_or(VbType::Long);
+                            self.temp_types.insert(dest, res_ty.clone());
+                            self.emit(IrInstruction::BinaryOp {
+                                dest,
+                                op: IrBinaryOp::Add,
+                                left: left_op,
+                                right: right_op,
+                                result_type: res_ty,
+                            });
+                        }
                     }
                     BinaryOperator::Subtract => {
                         let left_ty = self.infer_operand_type(&left_op);
@@ -1461,7 +1474,262 @@ impl AstToIrLowering {
                     }
                 }
 
-                // 2. Check function call
+                // 2. Check intrinsic string functions
+                if let Expression::Variable(name) = &**target {
+                    if name.eq_ignore_ascii_case("Len") {
+                        let arg_raw = self.lower_expression(&indices[0]);
+                        let arg_op = self.coerce_to_string(arg_raw);
+                        let dest = self.next_temp();
+                        self.temp_types.insert(dest, VbType::Long);
+                        self.emit(IrInstruction::Call {
+                            dest: Some(dest),
+                            name: "vb6_string_len".to_string(),
+                            args: vec![arg_op],
+                            return_type: Some(VbType::Long),
+                        });
+                        return Operand::Temp(dest);
+                    }
+                    if name.eq_ignore_ascii_case("Left") || name.eq_ignore_ascii_case("Left$") {
+                        let raw_s = self.lower_expression(&indices[0]);
+                        let s_op = self.coerce_to_string(raw_s);
+                        let n_op = self.lower_expression(&indices[1]);
+                        let dest = self.next_temp();
+                        self.temp_types.insert(dest, VbType::String);
+                        self.emit(IrInstruction::Call {
+                            dest: Some(dest),
+                            name: "vb6_string_left".to_string(),
+                            args: vec![s_op, n_op],
+                            return_type: Some(VbType::String),
+                        });
+                        return Operand::Temp(dest);
+                    }
+                    if name.eq_ignore_ascii_case("Right") || name.eq_ignore_ascii_case("Right$") {
+                        let raw_s = self.lower_expression(&indices[0]);
+                        let s_op = self.coerce_to_string(raw_s);
+                        let n_op = self.lower_expression(&indices[1]);
+                        let dest = self.next_temp();
+                        self.temp_types.insert(dest, VbType::String);
+                        self.emit(IrInstruction::Call {
+                            dest: Some(dest),
+                            name: "vb6_string_right".to_string(),
+                            args: vec![s_op, n_op],
+                            return_type: Some(VbType::String),
+                        });
+                        return Operand::Temp(dest);
+                    }
+                    if name.eq_ignore_ascii_case("Mid") || name.eq_ignore_ascii_case("Mid$") {
+                        let raw_s = self.lower_expression(&indices[0]);
+                        let s_op = self.coerce_to_string(raw_s);
+                        let start_op = self.lower_expression(&indices[1]);
+                        let len_op = if indices.len() > 2 {
+                            self.lower_expression(&indices[2])
+                        } else {
+                            Operand::Constant(IrConstant::Int(-1, VbType::Long))
+                        };
+                        let dest = self.next_temp();
+                        self.temp_types.insert(dest, VbType::String);
+                        self.emit(IrInstruction::Call {
+                            dest: Some(dest),
+                            name: "vb6_string_mid".to_string(),
+                            args: vec![s_op, start_op, len_op],
+                            return_type: Some(VbType::String),
+                        });
+                        return Operand::Temp(dest);
+                    }
+                    if name.eq_ignore_ascii_case("InStr") {
+                        let (start_op, s1_raw, s2_raw) = if indices.len() >= 3 {
+                            (self.lower_expression(&indices[0]), self.lower_expression(&indices[1]), self.lower_expression(&indices[2]))
+                        } else {
+                            (Operand::Constant(IrConstant::Int(1, VbType::Long)), self.lower_expression(&indices[0]), self.lower_expression(&indices[1]))
+                        };
+                        let s1_op = self.coerce_to_string(s1_raw);
+                        let s2_op = self.coerce_to_string(s2_raw);
+                        let dest = self.next_temp();
+                        self.temp_types.insert(dest, VbType::Long);
+                        self.emit(IrInstruction::Call {
+                            dest: Some(dest),
+                            name: "vb6_string_instr".to_string(),
+                            args: vec![start_op, s1_op, s2_op],
+                            return_type: Some(VbType::Long),
+                        });
+                        return Operand::Temp(dest);
+                    }
+                    if name.eq_ignore_ascii_case("UCase") || name.eq_ignore_ascii_case("UCase$") {
+                        let raw_s = self.lower_expression(&indices[0]);
+                        let s_op = self.coerce_to_string(raw_s);
+                        let dest = self.next_temp();
+                        self.temp_types.insert(dest, VbType::String);
+                        self.emit(IrInstruction::Call {
+                            dest: Some(dest),
+                            name: "vb6_string_ucase".to_string(),
+                            args: vec![s_op],
+                            return_type: Some(VbType::String),
+                        });
+                        return Operand::Temp(dest);
+                    }
+                    if name.eq_ignore_ascii_case("LCase") || name.eq_ignore_ascii_case("LCase$") {
+                        let raw_s = self.lower_expression(&indices[0]);
+                        let s_op = self.coerce_to_string(raw_s);
+                        let dest = self.next_temp();
+                        self.temp_types.insert(dest, VbType::String);
+                        self.emit(IrInstruction::Call {
+                            dest: Some(dest),
+                            name: "vb6_string_lcase".to_string(),
+                            args: vec![s_op],
+                            return_type: Some(VbType::String),
+                        });
+                        return Operand::Temp(dest);
+                    }
+                    if name.eq_ignore_ascii_case("Trim") || name.eq_ignore_ascii_case("Trim$") {
+                        let raw_s = self.lower_expression(&indices[0]);
+                        let s_op = self.coerce_to_string(raw_s);
+                        let dest = self.next_temp();
+                        self.temp_types.insert(dest, VbType::String);
+                        self.emit(IrInstruction::Call {
+                            dest: Some(dest),
+                            name: "vb6_string_trim".to_string(),
+                            args: vec![s_op],
+                            return_type: Some(VbType::String),
+                        });
+                        return Operand::Temp(dest);
+                    }
+                    if name.eq_ignore_ascii_case("LTrim") || name.eq_ignore_ascii_case("LTrim$") {
+                        let raw_s = self.lower_expression(&indices[0]);
+                        let s_op = self.coerce_to_string(raw_s);
+                        let dest = self.next_temp();
+                        self.temp_types.insert(dest, VbType::String);
+                        self.emit(IrInstruction::Call {
+                            dest: Some(dest),
+                            name: "vb6_string_ltrim".to_string(),
+                            args: vec![s_op],
+                            return_type: Some(VbType::String),
+                        });
+                        return Operand::Temp(dest);
+                    }
+                    if name.eq_ignore_ascii_case("RTrim") || name.eq_ignore_ascii_case("RTrim$") {
+                        let raw_s = self.lower_expression(&indices[0]);
+                        let s_op = self.coerce_to_string(raw_s);
+                        let dest = self.next_temp();
+                        self.temp_types.insert(dest, VbType::String);
+                        self.emit(IrInstruction::Call {
+                            dest: Some(dest),
+                            name: "vb6_string_rtrim".to_string(),
+                            args: vec![s_op],
+                            return_type: Some(VbType::String),
+                        });
+                        return Operand::Temp(dest);
+                    }
+                    if name.eq_ignore_ascii_case("Space") || name.eq_ignore_ascii_case("Space$") {
+                        let n_op = self.lower_expression(&indices[0]);
+                        let dest = self.next_temp();
+                        self.temp_types.insert(dest, VbType::String);
+                        self.emit(IrInstruction::Call {
+                            dest: Some(dest),
+                            name: "vb6_string_space".to_string(),
+                            args: vec![n_op],
+                            return_type: Some(VbType::String),
+                        });
+                        return Operand::Temp(dest);
+                    }
+                    if name.eq_ignore_ascii_case("String") || name.eq_ignore_ascii_case("String$") {
+                        let n_op = self.lower_expression(&indices[0]);
+                        let raw_char = self.lower_expression(&indices[1]);
+                        let raw_ty = self.infer_operand_type(&raw_char);
+                        let char_op = if raw_ty.is_integer() {
+                            let chr_dest = self.next_temp();
+                            self.temp_types.insert(chr_dest, VbType::String);
+                            self.emit(IrInstruction::Call {
+                                dest: Some(chr_dest),
+                                name: "vb6_string_chr".to_string(),
+                                args: vec![raw_char],
+                                return_type: Some(VbType::String),
+                            });
+                            Operand::Temp(chr_dest)
+                        } else {
+                            self.coerce_to_string(raw_char)
+                        };
+                        let dest = self.next_temp();
+                        self.temp_types.insert(dest, VbType::String);
+                        self.emit(IrInstruction::Call {
+                            dest: Some(dest),
+                            name: "vb6_string_string".to_string(),
+                            args: vec![n_op, char_op],
+                            return_type: Some(VbType::String),
+                        });
+                        return Operand::Temp(dest);
+                    }
+                    if name.eq_ignore_ascii_case("Replace") {
+                        let raw_expr = self.lower_expression(&indices[0]);
+                        let expr_op = self.coerce_to_string(raw_expr);
+                        let raw_find = self.lower_expression(&indices[1]);
+                        let find_op = self.coerce_to_string(raw_find);
+                        let raw_repl = self.lower_expression(&indices[2]);
+                        let repl_op = self.coerce_to_string(raw_repl);
+                        let dest = self.next_temp();
+                        self.temp_types.insert(dest, VbType::String);
+                        self.emit(IrInstruction::Call {
+                            dest: Some(dest),
+                            name: "vb6_string_replace".to_string(),
+                            args: vec![expr_op, find_op, repl_op],
+                            return_type: Some(VbType::String),
+                        });
+                        return Operand::Temp(dest);
+                    }
+                    if name.eq_ignore_ascii_case("Chr") || name.eq_ignore_ascii_case("Chr$")
+                        || name.eq_ignore_ascii_case("ChrW") || name.eq_ignore_ascii_case("ChrW$")
+                    {
+                        let code_op = self.lower_expression(&indices[0]);
+                        let dest = self.next_temp();
+                        self.temp_types.insert(dest, VbType::String);
+                        self.emit(IrInstruction::Call {
+                            dest: Some(dest),
+                            name: "vb6_string_chr".to_string(),
+                            args: vec![code_op],
+                            return_type: Some(VbType::String),
+                        });
+                        return Operand::Temp(dest);
+                    }
+                    if name.eq_ignore_ascii_case("Asc") || name.eq_ignore_ascii_case("AscB") || name.eq_ignore_ascii_case("AscW") {
+                        let raw_s = self.lower_expression(&indices[0]);
+                        let s_op = self.coerce_to_string(raw_s);
+                        let dest = self.next_temp();
+                        self.temp_types.insert(dest, VbType::Integer);
+                        self.emit(IrInstruction::Call {
+                            dest: Some(dest),
+                            name: "vb6_string_asc".to_string(),
+                            args: vec![s_op],
+                            return_type: Some(VbType::Integer),
+                        });
+                        return Operand::Temp(dest);
+                    }
+                    if name.eq_ignore_ascii_case("Val") {
+                        let raw_s = self.lower_expression(&indices[0]);
+                        let s_op = self.coerce_to_string(raw_s);
+                        let dest = self.next_temp();
+                        self.temp_types.insert(dest, VbType::Double);
+                        self.emit(IrInstruction::Call {
+                            dest: Some(dest),
+                            name: "vb6_string_val".to_string(),
+                            args: vec![s_op],
+                            return_type: Some(VbType::Double),
+                        });
+                        return Operand::Temp(dest);
+                    }
+                    if name.eq_ignore_ascii_case("Str") || name.eq_ignore_ascii_case("Str$") {
+                        let v_op = self.lower_expression(&indices[0]);
+                        let dest = self.next_temp();
+                        self.temp_types.insert(dest, VbType::String);
+                        self.emit(IrInstruction::Call {
+                            dest: Some(dest),
+                            name: "vb6_string_str".to_string(),
+                            args: vec![v_op],
+                            return_type: Some(VbType::String),
+                        });
+                        return Operand::Temp(dest);
+                    }
+                }
+
+                // 3. Check function call
                 if let Expression::Variable(name) = &**target {
                     let key = name.to_ascii_uppercase();
                     if let Some((func_real_name, ret_ty)) = self.functions.get(&key).cloned() {
@@ -1472,6 +1740,7 @@ impl AstToIrLowering {
                             dest: Some(dest),
                             name: func_real_name,
                             args: args_ops,
+                            return_type: Some(ret_ty),
                         });
                         return Operand::Temp(dest);
                     }

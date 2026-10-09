@@ -120,10 +120,11 @@ impl IrPrinter {
                     false_target
                 )
             }
-            IrInstruction::Call { dest, name, args } => {
+            IrInstruction::Call { dest, name, args, return_type } => {
                 let args_str: Vec<String> = args.iter().map(Self::print_operand).collect();
+                let ret_str = return_type.as_ref().map(|t| format!(" : {:?}", t)).unwrap_or_default();
                 if let Some(d) = dest {
-                    format!("%{} = CALL \"{}\" [{}]", d, name, args_str.join(", "))
+                    format!("%{} = CALL \"{}\" [{}]{}", d, name, args_str.join(", "), ret_str)
                 } else {
                     format!("CALL \"{}\" [{}]", name, args_str.join(", "))
                 }

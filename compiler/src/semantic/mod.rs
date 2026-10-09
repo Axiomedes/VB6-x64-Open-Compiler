@@ -762,6 +762,44 @@ impl SemanticAnalyzer {
                         }
                         return VbType::Long;
                     }
+                    if name.eq_ignore_ascii_case("Len") || name.eq_ignore_ascii_case("InStr") {
+                        for idx in indices {
+                            let _ = self.infer_expression_type(idx);
+                        }
+                        return VbType::Long;
+                    }
+                    if name.eq_ignore_ascii_case("Asc") || name.eq_ignore_ascii_case("AscB") || name.eq_ignore_ascii_case("AscW") {
+                        for idx in indices {
+                            let _ = self.infer_expression_type(idx);
+                        }
+                        return VbType::Integer;
+                    }
+                    if name.eq_ignore_ascii_case("Val") {
+                        for idx in indices {
+                            let _ = self.infer_expression_type(idx);
+                        }
+                        return VbType::Double;
+                    }
+                    if name.eq_ignore_ascii_case("Left") || name.eq_ignore_ascii_case("Left$")
+                        || name.eq_ignore_ascii_case("Right") || name.eq_ignore_ascii_case("Right$")
+                        || name.eq_ignore_ascii_case("Mid") || name.eq_ignore_ascii_case("Mid$")
+                        || name.eq_ignore_ascii_case("UCase") || name.eq_ignore_ascii_case("UCase$")
+                        || name.eq_ignore_ascii_case("LCase") || name.eq_ignore_ascii_case("LCase$")
+                        || name.eq_ignore_ascii_case("Trim") || name.eq_ignore_ascii_case("Trim$")
+                        || name.eq_ignore_ascii_case("LTrim") || name.eq_ignore_ascii_case("LTrim$")
+                        || name.eq_ignore_ascii_case("RTrim") || name.eq_ignore_ascii_case("RTrim$")
+                        || name.eq_ignore_ascii_case("Space") || name.eq_ignore_ascii_case("Space$")
+                        || name.eq_ignore_ascii_case("String") || name.eq_ignore_ascii_case("String$")
+                        || name.eq_ignore_ascii_case("Replace")
+                        || name.eq_ignore_ascii_case("Chr") || name.eq_ignore_ascii_case("Chr$")
+                        || name.eq_ignore_ascii_case("ChrW") || name.eq_ignore_ascii_case("ChrW$")
+                        || name.eq_ignore_ascii_case("Str") || name.eq_ignore_ascii_case("Str$")
+                    {
+                        for idx in indices {
+                            let _ = self.infer_expression_type(idx);
+                        }
+                        return VbType::String;
+                    }
                 }
 
                 let proc_info = if let Expression::Variable(name) = &**target {

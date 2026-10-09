@@ -155,11 +155,12 @@ pub enum IrInstruction {
         true_target: String,
         false_target: String,
     },
-    /// Subroutine or function call: `%dest = CALL "MyFunc", [%arg0, %arg1]`
+    /// Subroutine or function call: `%dest = CALL "MyFunc", [%arg0, %arg1] : Type`
     Call {
         dest: Option<usize>,
         name: String,
         args: Vec<Operand>,
+        return_type: Option<VbType>,
     },
     /// Return from procedure: `RETURN [%value]`
     Return {
