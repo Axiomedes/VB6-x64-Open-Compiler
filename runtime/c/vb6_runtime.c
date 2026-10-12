@@ -984,4 +984,344 @@ int64_t vb6_object_get_refcount(void* obj) {
     return header->ref_count;
 }
 
+// -------------------------------------------------------------
+// VB6 Win32 UI and Controls Subsystem
+// -------------------------------------------------------------
+
+#define VB6_EVENT_CLICK   1
+#define VB6_EVENT_CHANGE  2
+#define VB6_EVENT_LOAD    3
+#define VB6_EVENT_UNLOAD  4
+#define VB6_EVENT_TIMER   5
+
+typedef void (*Vb6EventCallback)(void* target);
+
+typedef struct {
+    void* handle; // HWND or timer_id
+    int event_type;
+    Vb6EventCallback callback;
+    void* target; // object pointer (this)
+} Vb6EventHandler;
+
+#define MAX_EVENT_HANDLERS 256
+static Vb6EventHandler s_handlers[MAX_EVENT_HANDLERS];
+static int s_handler_count = 0;
+
+void vb6_register_event_handler(void* handle, int event_type, Vb6EventCallback cb, void* target) {
+    if (!handle || !cb) return;
+    for (int i = 0; i < s_handler_count; i++) {
+        if (s_handlers[i].handle == handle && s_handlers[i].event_type == event_type) {
+            s_handlers[i].callback = cb;
+            s_handlers[i].target = target;
+            return;
+        }
+    }
+    if (s_handler_count < MAX_EVENT_HANDLERS) {
+        s_handlers[s_handler_count].handle = handle;
+        s_handlers[s_handler_count].event_type = event_type;
+        s_handlers[s_handler_count].callback = cb;
+        s_handlers[s_handler_count].target = target;
+        s_handler_count++;
+    }
+}
+
+void vb6_trigger_event(void* handle, int event_type) {
+    for (int i = 0; i < s_handler_count; i++) {
+        if (s_handlers[i].handle == handle && s_handlers[i].event_type == event_type) {
+            if (s_handlers[i].callback) {
+                s_handlers[i].callback(s_handlers[i].target);
+            }
+        }
+    }
+}
+
+int vb6_do_events(void) {
+    MSG msg;
+    int count = 0;
+    while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) {
+        TranslateMessage(&msg);
+        DispatchMessageA(&msg);
+        count++;
+    }
+    return count;
+}
+
+static LRESULT CALLBACK Vb6FormWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+    switch (uMsg) {
+        case WM_COMMAND: {
+            HWND child = (HWND)lParam;
+            WORD notify_code = HIWORD(wParam);
+            if (child) {
+                if (notify_code == BN_CLICKED) {
+                    vb6_trigger_event((void*)child, VB6_EVENT_CLICK);
+                } else if (notify_code == EN_CHANGE) {
+                    vb6_trigger_event((void*)child, VB6_EVENT_CHANGE);
+                }
+            }
+            break;
+        }
+        case WM_TIMER: {
+            UINT_PTR timer_id = (UINT_PTR)wParam;
+            vb6_trigger_event((void*)timer_id, VB6_EVENT_TIMER);
+            break;
+        }
+        case WM_CLOSE: {
+            vb6_trigger_event((void*)hwnd, VB6_EVENT_UNLOAD);
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        default:
+            break;
+    }
+    return DefWindowProcA(hwnd, uMsg, wParam, lParam);
+}
+
+static void EnsureVb6WindowClass(void) {
+    static int s_registered = 0;
+    if (s_registered) return;
+    s_registered = 1;
+
+    WNDCLASSEXA wc;
+    memset(&wc, 0, sizeof(wc));
+    wc.cbSize = sizeof(WNDCLASSEXA);
+    wc.style = CS_HREDRAW | CS_VREDRAW;
+    wc.lpfnWndProc = Vb6FormWndProc;
+    wc.hInstance = GetModuleHandleA(NULL);
+    wc.hCursor = LoadCursorA(NULL, IDC_ARROW);
+    wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+    wc.lpszClassName = "VB6_Form_Class";
+    RegisterClassExA(&wc);
+}
+
+void* vb6_form_create(const char* caption, int left, int top, int width, int height) {
+    EnsureVb6WindowClass();
+    int x = (left > 500) ? (left / 15) : left;
+    int y = (top > 500) ? (top / 15) : top;
+    int w = (width > 500) ? (width / 15) : (width > 0 ? width : 400);
+    int h = (height > 500) ? (height / 15) : (height > 0 ? height : 300);
+    if (x <= 0) x = CW_USEDEFAULT;
+    if (y <= 0) y = CW_USEDEFAULT;
+
+    HWND hwnd = CreateWindowExA(
+        0,
+        "VB6_Form_Class",
+        caption ? caption : "Form",
+        WS_OVERLAPPEDWINDOW,
+        x, y, w, h,
+        NULL,
+        NULL,
+        GetModuleHandleA(NULL),
+        NULL
+    );
+    return (void*)hwnd;
+}
+
+void vb6_form_show(void* hwnd, int modal) {
+    if (hwnd) {
+        ShowWindow((HWND)hwnd, SW_SHOW);
+        UpdateWindow((HWND)hwnd);
+        vb6_trigger_event(hwnd, VB6_EVENT_LOAD);
+        vb6_do_events();
+    }
+}
+
+void vb6_form_hide(void* hwnd) {
+    if (hwnd) {
+        ShowWindow((HWND)hwnd, SW_HIDE);
+    }
+}
+
+void vb6_form_close(void* hwnd) {
+    if (hwnd) {
+        vb6_trigger_event(hwnd, VB6_EVENT_UNLOAD);
+        DestroyWindow((HWND)hwnd);
+    }
+}
+
+void* vb6_control_create_button(void* parent, const char* caption, int left, int top, int width, int height) {
+    int x = (left > 500) ? (left / 15) : left;
+    int y = (top > 500) ? (top / 15) : top;
+    int w = (width > 500) ? (width / 15) : (width > 0 ? width : 100);
+    int h = (height > 500) ? (height / 15) : (height > 0 ? height : 30);
+    static int s_btn_id = 1000;
+    HWND hwnd = CreateWindowExA(
+        0,
+        "BUTTON",
+        caption ? caption : "",
+        WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+        x, y, w, h,
+        (HWND)parent,
+        (HMENU)(intptr_t)(s_btn_id++),
+        GetModuleHandleA(NULL),
+        NULL
+    );
+    return (void*)hwnd;
+}
+
+void* vb6_control_create_textbox(void* parent, const char* text, int left, int top, int width, int height, int multiline) {
+    int x = (left > 500) ? (left / 15) : left;
+    int y = (top > 500) ? (top / 15) : top;
+    int w = (width > 500) ? (width / 15) : (width > 0 ? width : 120);
+    int h = (height > 500) ? (height / 15) : (height > 0 ? height : 25);
+    static int s_txt_id = 2000;
+    DWORD style = WS_CHILD | WS_VISIBLE | WS_BORDER | (multiline ? (ES_MULTILINE | ES_AUTOVSCROLL) : ES_AUTOHSCROLL);
+    HWND hwnd = CreateWindowExA(
+        WS_EX_CLIENTEDGE,
+        "EDIT",
+        text ? text : "",
+        style,
+        x, y, w, h,
+        (HWND)parent,
+        (HMENU)(intptr_t)(s_txt_id++),
+        GetModuleHandleA(NULL),
+        NULL
+    );
+    return (void*)hwnd;
+}
+
+void* vb6_control_create_label(void* parent, const char* caption, int left, int top, int width, int height) {
+    int x = (left > 500) ? (left / 15) : left;
+    int y = (top > 500) ? (top / 15) : top;
+    int w = (width > 500) ? (width / 15) : (width > 0 ? width : 100);
+    int h = (height > 500) ? (height / 15) : (height > 0 ? height : 20);
+    static int s_lbl_id = 3000;
+    HWND hwnd = CreateWindowExA(
+        0,
+        "STATIC",
+        caption ? caption : "",
+        WS_CHILD | WS_VISIBLE,
+        x, y, w, h,
+        (HWND)parent,
+        (HMENU)(intptr_t)(s_lbl_id++),
+        GetModuleHandleA(NULL),
+        NULL
+    );
+    return (void*)hwnd;
+}
+
+void* vb6_control_create_checkbox(void* parent, const char* caption, int left, int top, int width, int height) {
+    int x = (left > 500) ? (left / 15) : left;
+    int y = (top > 500) ? (top / 15) : top;
+    int w = (width > 500) ? (width / 15) : (width > 0 ? width : 100);
+    int h = (height > 500) ? (height / 15) : (height > 0 ? height : 25);
+    static int s_chk_id = 4000;
+    HWND hwnd = CreateWindowExA(
+        0,
+        "BUTTON",
+        caption ? caption : "",
+        WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+        x, y, w, h,
+        (HWND)parent,
+        (HMENU)(intptr_t)(s_chk_id++),
+        GetModuleHandleA(NULL),
+        NULL
+    );
+    return (void*)hwnd;
+}
+
+void* vb6_control_create_option(void* parent, const char* caption, int left, int top, int width, int height) {
+    int x = (left > 500) ? (left / 15) : left;
+    int y = (top > 500) ? (top / 15) : top;
+    int w = (width > 500) ? (width / 15) : (width > 0 ? width : 100);
+    int h = (height > 500) ? (height / 15) : (height > 0 ? height : 25);
+    static int s_opt_id = 5000;
+    HWND hwnd = CreateWindowExA(
+        0,
+        "BUTTON",
+        caption ? caption : "",
+        WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
+        x, y, w, h,
+        (HWND)parent,
+        (HMENU)(intptr_t)(s_opt_id++),
+        GetModuleHandleA(NULL),
+        NULL
+    );
+    return (void*)hwnd;
+}
+
+void* vb6_control_create_frame(void* parent, const char* caption, int left, int top, int width, int height) {
+    int x = (left > 500) ? (left / 15) : left;
+    int y = (top > 500) ? (top / 15) : top;
+    int w = (width > 500) ? (width / 15) : (width > 0 ? width : 200);
+    int h = (height > 500) ? (height / 15) : (height > 0 ? height : 150);
+    static int s_frm_id = 6000;
+    HWND hwnd = CreateWindowExA(
+        0,
+        "BUTTON",
+        caption ? caption : "",
+        WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+        x, y, w, h,
+        (HWND)parent,
+        (HMENU)(intptr_t)(s_frm_id++),
+        GetModuleHandleA(NULL),
+        NULL
+    );
+    return (void*)hwnd;
+}
+
+void* vb6_control_create_timer(void* parent, int interval, int enabled) {
+    static int s_timer_id = 7000;
+    UINT_PTR id = (UINT_PTR)(s_timer_id++);
+    if (enabled && interval > 0 && parent) {
+        SetTimer((HWND)parent, id, (UINT)interval, NULL);
+    }
+    return (void*)id;
+}
+
+void vb6_control_set_text(void* hwnd, const char* text) {
+    if (hwnd) {
+        SetWindowTextA((HWND)hwnd, text ? text : "");
+    }
+}
+
+char* vb6_control_get_text(void* hwnd) {
+    if (!hwnd) return _strdup("");
+    int len = GetWindowTextLengthA((HWND)hwnd);
+    char* buf = (char*)malloc(len + 1);
+    if (!buf) return _strdup("");
+    GetWindowTextA((HWND)hwnd, buf, len + 1);
+    return buf;
+}
+
+void vb6_control_set_value(void* hwnd, int value) {
+    if (hwnd) {
+        SendMessageA((HWND)hwnd, BM_SETCHECK, (WPARAM)value, 0);
+    }
+}
+
+int vb6_control_get_value(void* hwnd) {
+    if (!hwnd) return 0;
+    return (int)SendMessageA((HWND)hwnd, BM_GETCHECK, 0, 0);
+}
+
+void vb6_control_set_bounds(void* hwnd, int left, int top, int width, int height) {
+    if (hwnd) {
+        int x = (left > 500) ? (left / 15) : left;
+        int y = (top > 500) ? (top / 15) : top;
+        int w = (width > 500) ? (width / 15) : width;
+        int h = (height > 500) ? (height / 15) : height;
+        SetWindowPos((HWND)hwnd, NULL, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+}
+
+void vb6_control_set_visible(void* hwnd, int visible) {
+    if (hwnd) {
+        ShowWindow((HWND)hwnd, visible ? SW_SHOW : SW_HIDE);
+    }
+}
+
+void vb6_control_set_enabled(void* hwnd, int enabled) {
+    if (hwnd) {
+        EnableWindow((HWND)hwnd, enabled ? TRUE : FALSE);
+    }
+}
+
+void vb6_control_trigger_click(void* hwnd) {
+    if (hwnd) {
+        SendMessageA((HWND)hwnd, BM_CLICK, 0, 0);
+        vb6_do_events();
+    }
+}
+
+
 

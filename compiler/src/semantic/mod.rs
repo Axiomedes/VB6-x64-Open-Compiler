@@ -133,8 +133,22 @@ impl SemanticAnalyzer {
     pub fn analyze_file(&mut self, file: &SourceFile) -> Result<(), Vec<SemanticError>> {
         self.symbol_table.enter_scope(ScopeKind::Module);
 
+        let has_builtin_controls = file.declarations.iter().any(|d| {
+            if let Declaration::Class(c) = d {
+                c.name.eq_ignore_ascii_case("CommandButton")
+            } else {
+                false
+            }
+        });
+        let builtin_decls = if !has_builtin_controls {
+            crate::controls::get_builtin_control_declarations()
+        } else {
+            Vec::new()
+        };
+        let all_decls: Vec<&Declaration> = builtin_decls.iter().chain(file.declarations.iter()).collect();
+
         // Pre-pass 0: register all Class declarations so their names and member layouts are known
-        for decl in &file.declarations {
+        for decl in &all_decls {
             if let Declaration::Class(c) = decl {
                 let mut raw_fields = Vec::new();
                 for inner in &c.declarations {
@@ -217,7 +231,7 @@ impl SemanticAnalyzer {
         }
 
         // Preliminary pass: register all Type and Enum declarations first
-        for decl in &file.declarations {
+        for decl in &all_decls {
             if matches!(decl, Declaration::Type(_) | Declaration::Enum(_) | Declaration::Class(_)) {
                 self.declare_symbol(decl);
             }

@@ -178,6 +178,47 @@ impl SymbolTable {
         self.scopes[0]
             .symbols
             .insert("LEN".to_string(), len_symbol);
+
+        let rt_funcs = [
+            ("vb6_form_create", Some(VbType::LongLong)),
+            ("vb6_form_show", None),
+            ("vb6_form_hide", None),
+            ("vb6_form_close", None),
+            ("vb6_do_events", Some(VbType::Long)),
+            ("vb6_control_create_button", Some(VbType::LongLong)),
+            ("vb6_control_create_textbox", Some(VbType::LongLong)),
+            ("vb6_control_create_label", Some(VbType::LongLong)),
+            ("vb6_control_create_checkbox", Some(VbType::LongLong)),
+            ("vb6_control_create_option", Some(VbType::LongLong)),
+            ("vb6_control_create_frame", Some(VbType::LongLong)),
+            ("vb6_control_create_timer", Some(VbType::LongLong)),
+            ("vb6_control_set_text", None),
+            ("vb6_control_get_text", Some(VbType::String)),
+            ("vb6_control_set_value", None),
+            ("vb6_control_get_value", Some(VbType::Long)),
+            ("vb6_control_set_bounds", None),
+            ("vb6_control_set_visible", None),
+            ("vb6_control_set_enabled", None),
+            ("vb6_register_event_handler", None),
+            ("vb6_trigger_event", None),
+            ("vb6_control_trigger_click", None),
+            ("Load", None),
+            ("Unload", None),
+        ];
+        for (f_name, ret_ty) in rt_funcs {
+            let sym = Symbol {
+                name: f_name.to_string(),
+                kind: SymbolKind::Procedure {
+                    kind: if ret_ty.is_some() { ProcKind::Function } else { ProcKind::Sub },
+                    params: vec![ParameterInfo::new("args", VbType::Variant).param_array()],
+                    return_type: ret_ty.clone(),
+                },
+                vb_type: ret_ty.unwrap_or(VbType::Variant),
+                visibility: Visibility::Public,
+                span: Span::default(),
+            };
+            self.scopes[0].symbols.insert(f_name.to_ascii_uppercase(), sym);
+        }
     }
 
     pub fn enter_scope(&mut self, kind: ScopeKind) -> usize {
@@ -201,6 +242,14 @@ impl SymbolTable {
     pub fn define(&mut self, symbol: Symbol) -> Result<(), Symbol> {
         let key = symbol.name.to_ascii_uppercase();
         if let Some(existing) = self.scopes[self.current_scope].symbols.get(&key) {
+            // In VB6, a global variable can have the same name as a class (e.g. Form default instance: Public Form1 As Form1)
+            if matches!(existing.kind, SymbolKind::Class) && matches!(symbol.kind, SymbolKind::Variable { .. }) {
+                self.scopes[self.current_scope].symbols.insert(key, symbol);
+                return Ok(());
+            }
+            if matches!(existing.kind, SymbolKind::Variable { .. }) && matches!(symbol.kind, SymbolKind::Class) {
+                return Ok(());
+            }
             return Err(existing.clone());
         }
         self.scopes[self.current_scope].symbols.insert(key, symbol);

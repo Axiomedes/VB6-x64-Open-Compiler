@@ -151,6 +151,28 @@ impl LlvmEmitter {
             "vb6_object_addref" => Some(("void", &["ptr"])),
             "vb6_object_release" => Some(("void", &["ptr"])),
             "vb6_object_get_refcount" => Some(("i64", &["ptr"])),
+            "vb6_form_create" => Some(("i64", &["ptr", "i32", "i32", "i32", "i32"])),
+            "vb6_form_show" => Some(("void", &["i64", "i32"])),
+            "vb6_form_hide" => Some(("void", &["i64"])),
+            "vb6_form_close" => Some(("void", &["i64"])),
+            "vb6_do_events" => Some(("i32", &[])),
+            "vb6_control_create_button" => Some(("i64", &["i64", "ptr", "i32", "i32", "i32", "i32"])),
+            "vb6_control_create_textbox" => Some(("i64", &["i64", "ptr", "i32", "i32", "i32", "i32", "i32"])),
+            "vb6_control_create_label" => Some(("i64", &["i64", "ptr", "i32", "i32", "i32", "i32"])),
+            "vb6_control_create_checkbox" => Some(("i64", &["i64", "ptr", "i32", "i32", "i32", "i32"])),
+            "vb6_control_create_option" => Some(("i64", &["i64", "ptr", "i32", "i32", "i32", "i32"])),
+            "vb6_control_create_frame" => Some(("i64", &["i64", "ptr", "i32", "i32", "i32", "i32"])),
+            "vb6_control_create_timer" => Some(("i64", &["i64", "i32", "i32"])),
+            "vb6_control_set_text" => Some(("void", &["i64", "ptr"])),
+            "vb6_control_get_text" => Some(("ptr", &["i64"])),
+            "vb6_control_set_value" => Some(("void", &["i64", "i32"])),
+            "vb6_control_get_value" => Some(("i32", &["i64"])),
+            "vb6_control_set_bounds" => Some(("void", &["i64", "i32", "i32", "i32", "i32"])),
+            "vb6_control_set_visible" => Some(("void", &["i64", "i32"])),
+            "vb6_control_set_enabled" => Some(("void", &["i64", "i32"])),
+            "vb6_register_event_handler" => Some(("void", &["i64", "i32", "ptr", "ptr"])),
+            "vb6_trigger_event" => Some(("void", &["i64", "i32"])),
+            "vb6_control_trigger_click" => Some(("void", &["i64"])),
             _ => None,
         }
     }
@@ -258,7 +280,29 @@ impl LlvmEmitter {
         out.push_str("declare ptr @vb6_object_create(i64, ptr)\n");
         out.push_str("declare void @vb6_object_addref(ptr)\n");
         out.push_str("declare void @vb6_object_release(ptr)\n");
-        out.push_str("declare i64 @vb6_object_get_refcount(ptr)\n\n");
+        out.push_str("declare i64 @vb6_object_get_refcount(ptr)\n");
+        out.push_str("declare i64 @vb6_form_create(ptr, i32, i32, i32, i32)\n");
+        out.push_str("declare void @vb6_form_show(i64, i32)\n");
+        out.push_str("declare void @vb6_form_hide(i64)\n");
+        out.push_str("declare void @vb6_form_close(i64)\n");
+        out.push_str("declare i32 @vb6_do_events()\n");
+        out.push_str("declare i64 @vb6_control_create_button(i64, ptr, i32, i32, i32, i32)\n");
+        out.push_str("declare i64 @vb6_control_create_textbox(i64, ptr, i32, i32, i32, i32, i32)\n");
+        out.push_str("declare i64 @vb6_control_create_label(i64, ptr, i32, i32, i32, i32)\n");
+        out.push_str("declare i64 @vb6_control_create_checkbox(i64, ptr, i32, i32, i32, i32)\n");
+        out.push_str("declare i64 @vb6_control_create_option(i64, ptr, i32, i32, i32, i32)\n");
+        out.push_str("declare i64 @vb6_control_create_frame(i64, ptr, i32, i32, i32, i32)\n");
+        out.push_str("declare i64 @vb6_control_create_timer(i64, i32, i32)\n");
+        out.push_str("declare void @vb6_control_set_text(i64, ptr)\n");
+        out.push_str("declare ptr @vb6_control_get_text(i64)\n");
+        out.push_str("declare void @vb6_control_set_value(i64, i32)\n");
+        out.push_str("declare i32 @vb6_control_get_value(i64)\n");
+        out.push_str("declare void @vb6_control_set_bounds(i64, i32, i32, i32, i32)\n");
+        out.push_str("declare void @vb6_control_set_visible(i64, i32)\n");
+        out.push_str("declare void @vb6_control_set_enabled(i64, i32)\n");
+        out.push_str("declare void @vb6_register_event_handler(i64, i32, ptr, ptr)\n");
+        out.push_str("declare void @vb6_trigger_event(i64, i32)\n");
+        out.push_str("declare void @vb6_control_trigger_click(i64)\n\n");
 
         // Module-level global and static variables
         let mut global_types: HashMap<String, String> = HashMap::new();

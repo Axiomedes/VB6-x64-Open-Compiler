@@ -2,6 +2,7 @@
 
 pub mod ast;
 pub mod codegen;
+pub mod controls;
 pub mod ir;
 pub mod lexer;
 pub mod optimizer;

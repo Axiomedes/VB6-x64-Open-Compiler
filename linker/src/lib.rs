@@ -201,6 +201,7 @@ impl Linker {
 
         // Standard Windows system libraries
         cmd.arg("-luser32");
+        cmd.arg("-lgdi32");
         cmd.arg("-lole32");
         cmd.arg("-loleaut32");
         cmd.arg("-lkernel32");

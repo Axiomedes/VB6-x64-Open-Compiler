@@ -135,6 +135,13 @@ impl Parser {
                 let decl = self.parse_module_variables(Visibility::Private)?;
                 Ok(Some(Declaration::ModuleVariables(decl)))
             }
+            TokenKind::Identifier(ref id) if id.eq_ignore_ascii_case("Option") => {
+                self.advance();
+                while !self.is_at_end() && !self.check(&TokenKind::Newline) && !self.check(&TokenKind::Colon) {
+                    self.advance();
+                }
+                Ok(None)
+            }
             _ => {
                 let span = token.span;
                 Err(ParserError::UnexpectedToken(

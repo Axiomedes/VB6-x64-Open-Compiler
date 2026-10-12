@@ -108,6 +108,19 @@ fn compile_single_source_file(
         let cls_mod = vb6_project::CLSLoader::parse(&content, source_path, Some(module_name.to_string()));
         let class_name = cls_mod.name.clone();
         (format!("Class {}\n{}\nEnd Class\n", class_name, cls_mod.code), class_name)
+    } else if ext == "frm" {
+        let form_mod = vb6_project::FRMParser::parse(&content, source_path);
+        let desugared = vb6_project::FRMDesugarer::desugar(&form_mod);
+        let form_name = form_mod.name.clone();
+        let full_code = if !form_mod.code.to_ascii_lowercase().contains("sub main") {
+            format!(
+                "{}\nPublic Sub Main()\n    Set {} = New {}\n    {}.Show\n    vb6_do_events\nEnd Sub\n",
+                desugared, form_name, form_name, form_name
+            )
+        } else {
+            desugared
+        };
+        (full_code, form_name)
     } else {
         (content, module_name.to_string())
     };
@@ -195,8 +208,43 @@ fn compile_vbp_project(
         combined_declarations.append(&mut ast.declarations);
     }
 
+    for f in &project.forms {
+        println!("Reading form module {}: {}", f.name, f.path.display());
+        let desugared = vb6_project::FRMDesugarer::desugar(f);
+        let mut ast = parse_source(&desugared)
+            .map_err(|e| anyhow::anyhow!("Failed parsing form {}: {}", f.name, e))?;
+        combined_declarations.append(&mut ast.declarations);
+    }
+
+    // Check if Sub Main is already defined
+    let has_main = combined_declarations.iter().any(|d| match d {
+        vb6_compiler::ast::Declaration::Function(f) => f.name.eq_ignore_ascii_case("Main"),
+        _ => false,
+    });
+
+    if !has_main {
+        let startup_form = if !project.settings.startup.is_empty() && !project.settings.startup.eq_ignore_ascii_case("Sub Main") {
+            project.settings.startup.clone()
+        } else if let Some(first_form) = project.forms.first() {
+            first_form.name.clone()
+        } else {
+            String::new()
+        };
+
+        if !startup_form.is_empty() {
+            println!("Synthesizing startup entry point for form: {}", startup_form);
+            let startup_code = format!(
+                "Public Sub Main()\n    Set {} = New {}\n    {}.Show\n    vb6_do_events\nEnd Sub\n",
+                startup_form, startup_form, startup_form
+            );
+            let mut ast = parse_source(&startup_code)
+                .map_err(|e| anyhow::anyhow!("Failed generating startup wrapper: {}", e))?;
+            combined_declarations.append(&mut ast.declarations);
+        }
+    }
+
     if combined_declarations.is_empty() {
-        anyhow::bail!("No modules or code declarations found in project.");
+        anyhow::bail!("No modules, classes, or forms found in project.");
     }
 
     let combined_ast = vb6_compiler::ast::SourceFile {
