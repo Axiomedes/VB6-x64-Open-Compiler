@@ -1,6 +1,6 @@
 # VB6 Open Compiler x64
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![Platform: Windows x64](https://img.shields.io/badge/Platform-Windows%20x64%20(PE32%2B)-green.svg)](COMPATIBILITY.md)
 [![Architecture: Clean Room](https://img.shields.io/badge/Architecture-Clean--Room-brightgreen.svg)](ARCHITECTURE.md)
 
@@ -94,4 +94,4 @@ Consulte [tests/](tests/) para el catálogo de pruebas automatizadas.
 
 ## 📜 Licencia
 
-Distribuido bajo la [Licencia MIT](LICENSE).
+Distribuido bajo la Licencia GNU General Public License v3.0 ([GPLv3](LICENSE)).

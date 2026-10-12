@@ -14,8 +14,8 @@ members = [
 version = "0.1.0"
 edition = "2021"
 authors = ["VB6 Open Compiler Contributors"]
-license = "MIT"
-repository = "https://github.com/vb6opencompiler/vb6c"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/Axiomedes/VB6-x64-Open-Compiler"
 
 [workspace.dependencies]
 thiserror = "2.0"
