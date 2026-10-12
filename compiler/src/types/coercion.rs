@@ -55,6 +55,19 @@ pub fn check_coercion(from: &VbType, target: &VbType) -> CoercionKind {
         }
     }
 
+    // Case-insensitive match for Class
+    if let (VbType::Class(c1), VbType::Class(c2)) = (from, target) {
+        if c1.eq_ignore_ascii_case(c2) {
+            return CoercionKind::Exact;
+        }
+    }
+    if matches!(from, VbType::Class(_)) && *target == VbType::Object {
+        return CoercionKind::Widening;
+    }
+    if *from == VbType::Object && matches!(target, VbType::Class(_)) {
+        return CoercionKind::Narrowing;
+    }
+
     // String <-> FixedString
     if matches!((from, target), (VbType::String, VbType::FixedString(_)) | (VbType::FixedString(_), VbType::String)) {
         return CoercionKind::Exact;

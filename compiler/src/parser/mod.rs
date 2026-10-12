@@ -126,6 +126,11 @@ impl Parser {
                 let enum_decl = self.parse_enum_declaration(Visibility::Default, token.span)?;
                 Ok(Some(Declaration::Enum(enum_decl)))
             }
+            TokenKind::Class => {
+                self.advance();
+                let cls = self.parse_class_declaration(Visibility::Default, token.span)?;
+                Ok(Some(Declaration::Class(cls)))
+            }
             TokenKind::Dim | TokenKind::Const | TokenKind::Static => {
                 let decl = self.parse_module_variables(Visibility::Private)?;
                 Ok(Some(Declaration::ModuleVariables(decl)))
@@ -172,6 +177,11 @@ impl Parser {
                 self.advance();
                 let enum_decl = self.parse_enum_declaration(vis, next_token.span)?;
                 Ok(Some(Declaration::Enum(enum_decl)))
+            }
+            TokenKind::Class => {
+                self.advance();
+                let cls = self.parse_class_declaration(vis, next_token.span)?;
+                Ok(Some(Declaration::Class(cls)))
             }
             TokenKind::Dim | TokenKind::Const => {
                 let vars = self.parse_module_variables(vis)?;
@@ -515,6 +525,63 @@ impl Parser {
         })
     }
 
+    fn parse_class_declaration(
+        &mut self,
+        visibility: Visibility,
+        start_span: Span,
+    ) -> Result<ClassDeclaration, ParserError> {
+        let name = self.expect_identifier("Class name")?;
+        self.expect_statement_terminator("Class header")?;
+
+        let mut declarations = Vec::new();
+        let end_span;
+
+        loop {
+            self.skip_newlines_and_colons();
+            if self.is_at_end() {
+                return Err(ParserError::UnexpectedEof("End Class"));
+            }
+
+            if self.check(&TokenKind::End) {
+                let end_token = self.advance().clone();
+                if self.check(&TokenKind::Class) {
+                    let cls_token = self.advance().clone();
+                    end_span = Span::new(
+                        end_token.span.start_line,
+                        end_token.span.start_col,
+                        cls_token.span.end_line,
+                        cls_token.span.end_col,
+                    );
+                    self.expect_statement_terminator("End Class")?;
+                    break;
+                } else {
+                    return Err(ParserError::UnexpectedToken(
+                        self.peek().kind.clone(),
+                        self.peek().span.start_line,
+                        self.peek().span.start_col,
+                        "'Class' following 'End'",
+                    ));
+                }
+            }
+
+            if let Some(decl) = self.parse_declaration()? {
+                declarations.push(decl);
+            }
+        }
+
+        Ok(ClassDeclaration {
+            name,
+            visibility,
+            declarations,
+            span: Span::new(
+                start_span.start_line,
+                start_span.start_col,
+                end_span.end_line,
+                end_span.end_col,
+            ),
+        })
+    }
+
     fn parse_block_until(
         &mut self,
         expected_end_kind: TokenKind,
@@ -705,7 +772,11 @@ impl Parser {
             }
             TokenKind::Call => {
                 let call_span = self.advance().span;
-                let name = self.expect_identifier("procedure name after Call")?;
+                let mut name = self.expect_identifier("procedure name after Call")?;
+                while self.match_token(&TokenKind::Dot) {
+                    let member = self.expect_identifier("member after '.'")?;
+                    name = format!("{}.{}", name, member);
+                }
                 let mut args = Vec::new();
                 if self.match_token(&TokenKind::LParen) {
                     while !self.check(&TokenKind::RParen) && !self.is_at_end() {
@@ -798,17 +869,41 @@ impl Parser {
                         }
                         (n, args)
                     }
+                    Expression::MemberAccess { object, member } => {
+                        let mut args = Vec::new();
+                        while !matches!(self.peek().kind, TokenKind::Newline | TokenKind::Colon | TokenKind::Eof) {
+                            args.push(self.parse_expression()?);
+                            if !self.match_token(&TokenKind::Comma) {
+                                break;
+                            }
+                        }
+                        let obj_name = match *object {
+                            Expression::Variable(ref n) => n.clone(),
+                            Expression::Me => "Me".to_string(),
+                            _ => "obj".to_string(),
+                        };
+                        (format!("{}.{}", obj_name, member), args)
+                    }
                     Expression::IndexAccess { target, indices } => {
-                        if let Expression::Variable(n) = *target {
-                            (n, indices)
-                        } else {
-                            let span = token.span;
-                            return Err(ParserError::UnexpectedToken(
-                                token.kind,
-                                span.start_line,
-                                span.start_col,
-                                "statement",
-                            ));
+                        match *target {
+                            Expression::Variable(n) => (n, indices),
+                            Expression::MemberAccess { object, member } => {
+                                let obj_name = match *object {
+                                    Expression::Variable(ref n) => n.clone(),
+                                    Expression::Me => "Me".to_string(),
+                                    _ => "obj".to_string(),
+                                };
+                                (format!("{}.{}", obj_name, member), indices)
+                            }
+                            _ => {
+                                let span = token.span;
+                                return Err(ParserError::UnexpectedToken(
+                                    token.kind,
+                                    span.start_line,
+                                    span.start_col,
+                                    "statement",
+                                ));
+                            }
                         }
                     }
                     _ => {
@@ -1607,6 +1702,15 @@ impl Parser {
                 self.advance();
                 let member = self.expect_identifier("member name after '.'")?;
                 Ok(Expression::WithMemberAccess(member))
+            }
+            TokenKind::New => {
+                self.advance();
+                let class_name = self.expect_identifier("class name after 'New'")?;
+                Ok(Expression::New(class_name))
+            }
+            TokenKind::Me => {
+                self.advance();
+                Ok(Expression::Me)
             }
             TokenKind::Identifier(id) => {
                 self.advance();

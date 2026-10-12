@@ -20,8 +20,15 @@ pub trait ASTVisitor {
             Declaration::ModuleVariables(v) => self.visit_module_vars(v),
             Declaration::Type(t) => self.visit_type_decl(t),
             Declaration::Enum(e) => self.visit_enum_decl(e),
+            Declaration::Class(c) => self.visit_class_decl(c),
             Declaration::Event(ev) => self.visit_event_decl(ev),
             Declaration::Comment(_) => {}
+        }
+    }
+
+    fn visit_class_decl(&mut self, class: &ClassDeclaration) {
+        for decl in &class.declarations {
+            self.visit_declaration(decl);
         }
     }
 

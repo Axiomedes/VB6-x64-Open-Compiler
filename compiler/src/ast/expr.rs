@@ -24,6 +24,8 @@ pub enum Expression {
         op: UnaryOperator,
         operand: Box<Expression>,
     },
+    New(String),
+    Me,
     Paren(Box<Expression>),
 }
 

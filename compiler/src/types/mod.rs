@@ -1,9 +1,9 @@
-//! Visual Basic 6.0 Type System and coercion rules.
-
+pub mod class;
 pub mod coercion;
 pub mod enum_def;
 pub mod udt;
 
+pub use class::*;
 pub use coercion::*;
 pub use enum_def::*;
 pub use udt::*;
@@ -26,6 +26,7 @@ pub enum VbType {
     FixedString(usize), // Fixed-length string: String * n
     Variant,
     Object,
+    Class(String),
     Array(Box<VbType>),
     UserDefined(String),
     Enum(String),
@@ -69,7 +70,7 @@ impl VbType {
             VbType::String => if is_64bit { 8 } else { 4 }, // BSTR pointer
             VbType::FixedString(len) => *len,
             VbType::Variant => if is_64bit { 24 } else { 16 },
-            VbType::Object => if is_64bit { 8 } else { 4 }, // Interface pointer
+            VbType::Object | VbType::Class(_) => if is_64bit { 8 } else { 4 }, // Interface pointer
             VbType::Array(_) => if is_64bit { 8 } else { 4 }, // SAFEARRAY pointer
             VbType::Enum(_) => 4,
             VbType::UserDefined(_) => 0, // Computed dynamically via UdtLayout
@@ -93,12 +94,16 @@ impl VbType {
             VbType::String => if is_64bit { 8 } else { 4 },
             VbType::FixedString(_) => 1,
             VbType::Variant => 8,
-            VbType::Object => if is_64bit { 8 } else { 4 },
+            VbType::Object | VbType::Class(_) => if is_64bit { 8 } else { 4 },
             VbType::Array(_) => if is_64bit { 8 } else { 4 },
             VbType::Enum(_) => 4,
             VbType::UserDefined(_) => 1,
             VbType::Unknown => 1,
         }
+    }
+
+    pub fn is_reference(&self) -> bool {
+        matches!(self, VbType::Object | VbType::Class(_))
     }
 
     /// Check if this type can be implicitly coerced/assigned to `target`.
@@ -139,11 +144,11 @@ impl VbType {
     }
 
     pub fn is_reference_type(&self) -> bool {
-        matches!(self, VbType::Object | VbType::Array(_))
+        matches!(self, VbType::Object | VbType::Array(_) | VbType::Class(_))
     }
 
     pub fn is_object_or_variant(&self) -> bool {
-        matches!(self, VbType::Object | VbType::Variant | VbType::UserDefined(_))
+        matches!(self, VbType::Object | VbType::Variant | VbType::UserDefined(_) | VbType::Class(_))
     }
 
     /// Return integer value bounds `(min, max)` for integer types.

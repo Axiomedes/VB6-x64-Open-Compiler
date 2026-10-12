@@ -74,6 +74,14 @@ impl ASTPrinter {
                 }
                 self.indent -= 1;
             }
+            Declaration::Class(c) => {
+                self.line(&format!("ClassDeclaration: {}", c.name));
+                self.indent += 1;
+                for d in &c.declarations {
+                    self.print_declaration(d);
+                }
+                self.indent -= 1;
+            }
             Declaration::Comment(c) => {
                 self.line(&format!("Comment: '{}'", c));
             }

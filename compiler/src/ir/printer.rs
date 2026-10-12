@@ -239,6 +239,15 @@ impl IrPrinter {
                     Self::print_operand(base), offset, Self::print_operand(value), member_type
                 )
             }
+            IrInstruction::NewObject { dest, class_name } => {
+                format!("%{} = NEW_OBJECT \"{}\"", dest, class_name)
+            }
+            IrInstruction::AddRef { object } => {
+                format!("ADDREF {}", Self::print_operand(object))
+            }
+            IrInstruction::Release { object } => {
+                format!("RELEASE {}", Self::print_operand(object))
+            }
         }
     }
 

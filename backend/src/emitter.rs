@@ -3,7 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 use vb6_compiler::ir::model::*;
-use vb6_compiler::types::{UdtLayout, VbType};
+use vb6_compiler::types::{ClassLayout, UdtLayout, VbType};
 
 pub struct LlvmEmitter {
     target_triple: String,
@@ -34,7 +34,7 @@ impl LlvmEmitter {
             VbType::LongPtr | VbType::LongLong | VbType::Currency => "i64",
             VbType::Single => "float",
             VbType::Double | VbType::Date => "double",
-            VbType::String | VbType::Object | VbType::Array(_) => "ptr",
+            VbType::String | VbType::Object | VbType::Class(_) | VbType::Array(_) => "ptr",
             VbType::FixedString(_) => "ptr",
             VbType::Variant => "[24 x i8]",
             VbType::UserDefined(_) => "ptr",
@@ -48,7 +48,7 @@ impl LlvmEmitter {
             VbType::Byte | VbType::Integer | VbType::Boolean | VbType::Long | VbType::Enum(_) => "0",
             VbType::LongPtr | VbType::LongLong | VbType::Currency => "0",
             VbType::Single | VbType::Double | VbType::Date => "0.0",
-            VbType::String | VbType::Object | VbType::Array(_) | VbType::FixedString(_) => "null",
+            VbType::String | VbType::Object | VbType::Class(_) | VbType::Array(_) | VbType::FixedString(_) => "null",
             VbType::Variant => "zeroinitializer",
             VbType::UserDefined(_) => "null",
             VbType::Unknown => "0",
@@ -147,6 +147,10 @@ impl LlvmEmitter {
             "vb6_memory_zero" => Some(("void", &["ptr", "i64"])),
             "vb6_fixed_str_set" => Some(("void", &["ptr", "i64", "ptr"])),
             "vb6_fixed_str_get" => Some(("ptr", &["ptr", "i64"])),
+            "vb6_object_create" => Some(("ptr", &["i64", "ptr"])),
+            "vb6_object_addref" => Some(("void", &["ptr"])),
+            "vb6_object_release" => Some(("void", &["ptr"])),
+            "vb6_object_get_refcount" => Some(("i64", &["ptr"])),
             _ => None,
         }
     }
@@ -250,7 +254,11 @@ impl LlvmEmitter {
         out.push_str("declare void @vb6_memory_copy(ptr, ptr, i64)\n");
         out.push_str("declare void @vb6_memory_zero(ptr, i64)\n");
         out.push_str("declare void @vb6_fixed_str_set(ptr, i64, ptr)\n");
-        out.push_str("declare ptr @vb6_fixed_str_get(ptr, i64)\n\n");
+        out.push_str("declare ptr @vb6_fixed_str_get(ptr, i64)\n");
+        out.push_str("declare ptr @vb6_object_create(i64, ptr)\n");
+        out.push_str("declare void @vb6_object_addref(ptr)\n");
+        out.push_str("declare void @vb6_object_release(ptr)\n");
+        out.push_str("declare i64 @vb6_object_get_refcount(ptr)\n\n");
 
         // Module-level global and static variables
         let mut global_types: HashMap<String, String> = HashMap::new();
@@ -305,7 +313,7 @@ impl LlvmEmitter {
             if func.name.eq_ignore_ascii_case("Main") {
                 has_main_sub = true;
             }
-            out.push_str(&self.emit_function(func, &string_constants, &global_types, &module.udt_layouts));
+            out.push_str(&self.emit_function(func, &string_constants, &global_types, &module.udt_layouts, &module.class_layouts));
             out.push('\n');
         }
 
@@ -383,6 +391,7 @@ impl LlvmEmitter {
         string_constants: &HashMap<String, String>,
         global_types: &HashMap<String, String>,
         udt_layouts: &HashMap<String, UdtLayout>,
+        class_layouts: &HashMap<String, ClassLayout>,
     ) -> String {
         let mut out = String::new();
 
@@ -393,14 +402,18 @@ impl LlvmEmitter {
             .unwrap_or("void");
 
         // Format parameters
+        let is_byref_ptr = |p: &IrParam| -> bool {
+            !p.is_by_val && matches!(p.vb_type, VbType::UserDefined(_))
+        };
+
         let params_str: Vec<String> = func
             .params
             .iter()
             .map(|p| {
-                if p.is_by_val {
-                    format!("{} %\"arg_{}\"", Self::llvm_type(&p.vb_type), p.name)
-                } else {
+                if is_byref_ptr(p) {
                     format!("ptr %\"arg_{}\"", p.name)
+                } else {
+                    format!("{} %\"arg_{}\"", Self::llvm_type(&p.vb_type), p.name)
                 }
             })
             .collect();
@@ -415,7 +428,7 @@ impl LlvmEmitter {
         let byref_params: HashSet<String> = func
             .params
             .iter()
-            .filter(|p| !p.is_by_val)
+            .filter(|p| is_byref_ptr(p))
             .map(|p| p.name.to_ascii_uppercase())
             .collect();
 
@@ -429,9 +442,7 @@ impl LlvmEmitter {
             for inst in &block.instructions {
                 if let IrInstruction::AllocLocal { name, vb_type, .. } = inst {
                     let key = name.to_ascii_uppercase();
-                    if byref_params.contains(&key) {
-                        local_types.insert(key, ("ptr".to_string(), 8));
-                    } else if let VbType::UserDefined(ref udt_name) = vb_type {
+                    if let VbType::UserDefined(ref udt_name) = vb_type {
                         if let Some(layout) = udt_layouts.get(&udt_name.to_ascii_uppercase()) {
                             local_types.insert(
                                 key,
@@ -508,17 +519,17 @@ impl LlvmEmitter {
                 }
 
                 for p in &func.params {
-                    if p.is_by_val {
+                    if is_byref_ptr(p) {
+                        // ByRef UDT is passed as pointer
+                        out.push_str(&format!(
+                            "  store ptr %\"arg_{}\", ptr %\"local_{}\"\n",
+                            p.name, p.name
+                        ));
+                    } else {
                         let llvm_ty = Self::llvm_type(&p.vb_type);
                         out.push_str(&format!(
                             "  store {} %\"arg_{}\", ptr %\"local_{}\"\n",
                             llvm_ty, p.name, p.name
-                        ));
-                    } else {
-                        // ByRef is passed as pointer
-                        out.push_str(&format!(
-                            "  store ptr %\"arg_{}\", ptr %\"local_{}\"\n",
-                            p.name, p.name
                         ));
                     }
                 }
@@ -535,6 +546,7 @@ impl LlvmEmitter {
                     &func.return_type,
                     &byref_params,
                     udt_layouts,
+                    class_layouts,
                     &mut branch_counter,
                 );
                 if matches!(
@@ -606,6 +618,7 @@ impl LlvmEmitter {
         func_ret_type: &Option<VbType>,
         byref_params: &HashSet<String>,
         udt_layouts: &HashMap<String, UdtLayout>,
+        class_layouts: &HashMap<String, ClassLayout>,
         branch_counter: &mut usize,
     ) {
         match inst {
@@ -617,10 +630,18 @@ impl LlvmEmitter {
                 temp_types.insert(*dest, src_ty.clone());
                 match src {
                     Operand::Local(ref name) => {
-                        out.push_str(&format!(
-                            "  %t{} = load {}, ptr %\"local_{}\"\n",
-                            dest, src_ty, name
-                        ));
+                        let key = name.to_ascii_uppercase();
+                        if byref_params.contains(&key) {
+                            *branch_counter += 1;
+                            let ptr_tmp = format!("%byref_ptr_{}", branch_counter);
+                            out.push_str(&format!("  {} = load ptr, ptr %\"local_{}\"\n", ptr_tmp, name));
+                            out.push_str(&format!("  %t{} = load {}, ptr {}\n", dest, src_ty, ptr_tmp));
+                        } else {
+                            out.push_str(&format!(
+                                "  %t{} = load {}, ptr %\"local_{}\"\n",
+                                dest, src_ty, name
+                            ));
+                        }
                     }
                     Operand::Global(ref name) => {
                         out.push_str(&format!(
@@ -677,7 +698,17 @@ impl LlvmEmitter {
                 };
                 if dest_is_variant {
                     let dest_ptr = match dest {
-                        Operand::Local(ref name) => format!("%\"local_{}\"", name),
+                        Operand::Local(ref name) => {
+                            let key = name.to_ascii_uppercase();
+                            if byref_params.contains(&key) {
+                                *branch_counter += 1;
+                                let ptr_tmp = format!("%byref_ptr_{}", branch_counter);
+                                out.push_str(&format!("  {} = load ptr, ptr %\"local_{}\"\n", ptr_tmp, name));
+                                ptr_tmp
+                            } else {
+                                format!("%\"local_{}\"", name)
+                            }
+                        }
                         Operand::Global(ref name) => format!("@\"{}\"", name),
                         _ => "".to_string(),
                     };
@@ -701,10 +732,18 @@ impl LlvmEmitter {
                     let (src_val, src_ty) = self.format_operand(src, local_types, global_types, temp_types, string_constants);
                     match dest {
                         Operand::Local(ref name) => {
-                            out.push_str(&format!(
-                                "  store {} {}, ptr %\"local_{}\"\n",
-                                src_ty, src_val, name
-                            ));
+                            let key = name.to_ascii_uppercase();
+                            if byref_params.contains(&key) {
+                                *branch_counter += 1;
+                                let ptr_tmp = format!("%byref_ptr_{}", branch_counter);
+                                out.push_str(&format!("  {} = load ptr, ptr %\"local_{}\"\n", ptr_tmp, name));
+                                out.push_str(&format!("  store {} {}, ptr {}\n", src_ty, src_val, ptr_tmp));
+                            } else {
+                                out.push_str(&format!(
+                                    "  store {} {}, ptr %\"local_{}\"\n",
+                                    src_ty, src_val, name
+                                ));
+                            }
                         }
                         Operand::Global(ref name) => {
                             out.push_str(&format!(
@@ -803,7 +842,7 @@ impl LlvmEmitter {
                             }
                         }
                         IrUnaryOp::BitNot => {
-                            out.push_str(&format!("  %t{} = xor {} {}, -1\n", dest, op_ty, op_val));
+                            out.push_str(&format!("  %t{} = xor {} {}, -1\n", dest, res_llvm_ty, op_val));
                         }
                     }
                 }
@@ -839,6 +878,15 @@ impl LlvmEmitter {
                     out.push_str(&format!(
                         "  %cmp{} = icmp {} i32 %var_cmp_{}, 0\n",
                         dest, cmp_op, c_id
+                    ));
+                    out.push_str(&format!(
+                        "  %t{} = select i1 %cmp{}, i16 -1, i16 0\n",
+                        dest, dest
+                    ));
+                } else if *op == IrCompareOp::Is {
+                    out.push_str(&format!(
+                        "  %cmp{} = icmp eq ptr {}, {}\n",
+                        dest, left_val, right_val
                     ));
                     out.push_str(&format!(
                         "  %t{} = select i1 %cmp{}, i16 -1, i16 0\n",
@@ -1727,6 +1775,36 @@ impl LlvmEmitter {
                     }
                 }
             }
+            IrInstruction::NewObject { dest, class_name } => {
+                let layout = class_layouts.get(&class_name.to_ascii_uppercase());
+                let total_size = layout.map(|l| l.total_size).unwrap_or(8);
+                let has_init = layout.map(|l| l.has_initialize).unwrap_or(false);
+                let has_term = layout.map(|l| l.has_terminate).unwrap_or(false);
+                let term_fn = if has_term {
+                    format!("@\"{}__Class_Terminate\"", class_name)
+                } else {
+                    "null".to_string()
+                };
+                out.push_str(&format!(
+                    "  %t{} = call ptr @vb6_object_create(i64 {}, ptr {})\n",
+                    dest, total_size, term_fn
+                ));
+                if has_init {
+                    out.push_str(&format!(
+                        "  call void @\"{}__Class_Initialize\"(ptr %t{})\n",
+                        class_name, dest
+                    ));
+                }
+                temp_types.insert(*dest, "ptr".to_string());
+            }
+            IrInstruction::AddRef { object } => {
+                let (obj_val, _) = self.format_operand(object, local_types, global_types, temp_types, string_constants);
+                out.push_str(&format!("  call void @vb6_object_addref(ptr {})\n", obj_val));
+            }
+            IrInstruction::Release { object } => {
+                let (obj_val, _) = self.format_operand(object, local_types, global_types, temp_types, string_constants);
+                out.push_str(&format!("  call void @vb6_object_release(ptr {})\n", obj_val));
+            }
             _ => {}
         }
     }
@@ -1821,7 +1899,7 @@ fn elem_size_bytes(vb_type: &VbType, udt_layouts: &HashMap<String, UdtLayout>) -
         VbType::Integer | VbType::Boolean => 2,
         VbType::Long | VbType::Enum(_) | VbType::Single => 4,
         VbType::LongPtr | VbType::LongLong | VbType::Currency | VbType::Double | VbType::Date => 8,
-        VbType::String | VbType::Object | VbType::Array(_) => 8,
+        VbType::String | VbType::Object | VbType::Class(_) | VbType::Array(_) => 8,
         VbType::UserDefined(name) => {
             udt_layouts.get(&name.to_ascii_uppercase()).map(|l| l.total_size).unwrap_or(8)
         }

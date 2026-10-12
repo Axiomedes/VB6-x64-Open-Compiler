@@ -13,6 +13,7 @@ pub enum Declaration {
     ModuleVariables(ModuleVariableDeclaration),
     Type(TypeDeclaration),
     Enum(EnumDeclaration),
+    Class(ClassDeclaration),
     Event(EventDeclaration),
     Comment(String),
 }
@@ -113,5 +114,13 @@ pub struct EventDeclaration {
     pub visibility: Visibility,
     pub name: String,
     pub params: Vec<Parameter>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClassDeclaration {
+    pub name: String,
+    pub visibility: Visibility,
+    pub declarations: Vec<Declaration>,
     pub span: Span,
 }

@@ -21,7 +21,7 @@ pub fn default_constant_for_type(ty: &VbType) -> IrConstant {
         VbType::Boolean => IrConstant::Bool(false),
         VbType::Date => IrConstant::Date("1899-12-30".to_string()),
         VbType::String => IrConstant::Null,
-        VbType::Object | VbType::UserDefined(_) => IrConstant::Nothing,
+        VbType::Object | VbType::Class(_) | VbType::UserDefined(_) => IrConstant::Nothing,
         VbType::Variant => IrConstant::Empty,
         _ => IrConstant::Int(0, VbType::Long),
     }
@@ -50,7 +50,10 @@ pub struct AstToIrLowering {
     pub udt_layouts: HashMap<String, crate::types::UdtLayout>,
     pub enum_defs: HashMap<String, crate::types::EnumDefinition>,
     pub enum_constants: HashMap<String, (i32, VbType)>,
+    pub class_layouts: HashMap<String, crate::types::ClassLayout>,
+    pub current_class: Option<String>,
     pub with_stack: Vec<WithContext>,
+    pub declared_locals: Vec<(String, VbType)>,
 }
 
 impl Default for AstToIrLowering {
@@ -78,7 +81,10 @@ impl AstToIrLowering {
             udt_layouts: HashMap::new(),
             enum_defs: HashMap::new(),
             enum_constants: HashMap::new(),
+            class_layouts: HashMap::new(),
+            current_class: None,
             with_stack: Vec::new(),
+            declared_locals: Vec::new(),
         }
     }
 
@@ -88,6 +94,8 @@ impl AstToIrLowering {
             VbType::Enum(ts.name.clone())
         } else if self.udt_layouts.contains_key(&key) {
             VbType::UserDefined(ts.name.clone())
+        } else if self.class_layouts.contains_key(&key) {
+            VbType::Class(ts.name.clone())
         } else if let Some(len) = ts.fixed_length {
             if ts.name.eq_ignore_ascii_case("String") {
                 VbType::FixedString(len)
@@ -228,16 +236,37 @@ impl AstToIrLowering {
             }
         };
 
-        let struct_name = match &base_ty {
-            VbType::UserDefined(s) => s.clone(),
-            _ => return None,
-        };
-        let layout = self.udt_layouts.get(&struct_name.to_ascii_uppercase())?;
-        let m = layout
-            .members
-            .iter()
-            .find(|m| m.name.eq_ignore_ascii_case(member))?;
-        Some((base_op, m.offset, m.vb_type.clone()))
+        match &base_ty {
+            VbType::UserDefined(s) => {
+                let layout = self.udt_layouts.get(&s.to_ascii_uppercase())?;
+                let m = layout
+                    .members
+                    .iter()
+                    .find(|m| m.name.eq_ignore_ascii_case(member))?;
+                Some((base_op, m.offset, m.vb_type.clone()))
+            }
+            VbType::Class(cls_name) => {
+                let (f_offset, f_type) = {
+                    let layout = self.class_layouts.get(&cls_name.to_ascii_uppercase())?;
+                    let f = layout.find_field(member)?;
+                    (f.offset, f.vb_type.clone())
+                };
+                let actual_base = match base_op {
+                    Operand::Local(_) => {
+                        let dest = self.next_temp();
+                        self.temp_types.insert(dest, VbType::Class(cls_name.clone()));
+                        self.emit(IrInstruction::Load {
+                            dest,
+                            src: base_op,
+                        });
+                        Operand::Temp(dest)
+                    }
+                    _ => base_op,
+                };
+                Some((actual_base, f_offset, f_type))
+            }
+            _ => None,
+        }
     }
 
     fn next_temp(&mut self) -> usize {
@@ -277,6 +306,93 @@ impl AstToIrLowering {
         self.udt_layouts.clear();
         self.enum_defs.clear();
         self.enum_constants.clear();
+
+        self.class_layouts.clear();
+
+        // Preliminary pass 0: register all Class declarations so their layouts and types are known
+        for decl in &file.declarations {
+            if let Declaration::Class(c) = decl {
+                let mut raw_fields = Vec::new();
+                for inner in &c.declarations {
+                    if let Declaration::ModuleVariables(mv) = inner {
+                        for var in &mv.variables {
+                            let mut f_type = var
+                                .type_spec
+                                .as_ref()
+                                .map(|ts| self.resolve_type_spec(ts))
+                                .unwrap_or(VbType::Variant);
+                            if var.dimensions.is_some() {
+                                f_type = VbType::Array(Box::new(f_type));
+                            }
+                            raw_fields.push((var.name.clone(), f_type, mv.visibility == Visibility::Public));
+                        }
+                    }
+                }
+                let mut layout = crate::types::ClassLayout::compute(&c.name, &raw_fields, &self.udt_layouts, true);
+                for inner in &c.declarations {
+                    match inner {
+                        Declaration::Sub(s) => {
+                            if s.name.eq_ignore_ascii_case("Class_Initialize") {
+                                layout.has_initialize = true;
+                            } else if s.name.eq_ignore_ascii_case("Class_Terminate") {
+                                layout.has_terminate = true;
+                            }
+                            let param_types = s.params.iter().map(|p| {
+                                p.param_type.as_ref().map(|ts| self.resolve_type_spec(ts)).unwrap_or(VbType::Variant)
+                            }).collect();
+                            layout.methods.insert(
+                                s.name.to_ascii_uppercase(),
+                                crate::types::ClassMethod {
+                                    name: s.name.clone(),
+                                    mangled_name: format!("{}__{}", c.name, s.name),
+                                    is_sub: true,
+                                    is_public: s.visibility == Visibility::Public,
+                                    return_type: None,
+                                    param_types,
+                                },
+                            );
+                        }
+                        Declaration::Function(f) => {
+                            let ret_ty = f.return_type.as_ref().map(|ts| self.resolve_type_spec(ts)).unwrap_or(VbType::Variant);
+                            let param_types = f.params.iter().map(|p| {
+                                p.param_type.as_ref().map(|ts| self.resolve_type_spec(ts)).unwrap_or(VbType::Variant)
+                            }).collect();
+                            layout.methods.insert(
+                                f.name.to_ascii_uppercase(),
+                                crate::types::ClassMethod {
+                                    name: f.name.clone(),
+                                    mangled_name: format!("{}__{}", c.name, f.name),
+                                    is_sub: false,
+                                    is_public: f.visibility == Visibility::Public,
+                                    return_type: Some(ret_ty),
+                                    param_types,
+                                },
+                            );
+                        }
+                        Declaration::Property(p) => {
+                            let prop_type = p.return_type.as_ref().map(|ts| self.resolve_type_spec(ts)).unwrap_or(VbType::Variant);
+                            let entry = layout.properties.entry(p.name.to_ascii_uppercase()).or_insert_with(|| {
+                                crate::types::ClassProperty {
+                                    name: p.name.clone(),
+                                    has_get: false,
+                                    has_let: false,
+                                    has_set: false,
+                                    is_public: p.visibility == Visibility::Public,
+                                    prop_type: prop_type.clone(),
+                                }
+                            });
+                            match p.kind {
+                                PropertyKind::Get => entry.has_get = true,
+                                PropertyKind::Let => entry.has_let = true,
+                                PropertyKind::Set => entry.has_set = true,
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                self.class_layouts.insert(c.name.to_ascii_uppercase(), layout);
+            }
+        }
 
         // Preliminary pass: register all Type and Enum declarations first
         for decl in &file.declarations {
@@ -357,6 +473,25 @@ impl AstToIrLowering {
                     let func = self.lower_function(f);
                     functions.push(func);
                 }
+                Declaration::Class(c) => {
+                    for inner in &c.declarations {
+                        match inner {
+                            Declaration::Sub(s) => {
+                                let func = self.lower_class_sub(&c.name, s);
+                                functions.push(func);
+                            }
+                            Declaration::Function(f) => {
+                                let func = self.lower_class_function(&c.name, f);
+                                functions.push(func);
+                            }
+                            Declaration::Property(p) => {
+                                let func = self.lower_class_property(&c.name, p);
+                                functions.push(func);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -366,6 +501,7 @@ impl AstToIrLowering {
             globals: self.globals_list.clone(),
             functions,
             udt_layouts: self.udt_layouts.clone(),
+            class_layouts: self.class_layouts.clone(),
         }
     }
 
@@ -374,6 +510,7 @@ impl AstToIrLowering {
         self.block_counter = 0;
         self.current_blocks.clear();
         self.local_vars.clear();
+        self.declared_locals.clear();
         self.static_vars.clear();
         self.temp_types.clear();
         self.for_exit_stack.clear();
@@ -435,6 +572,7 @@ impl AstToIrLowering {
         };
 
         if needs_return {
+            self.emit_local_reference_cleanup();
             self.current_blocks[last_idx]
                 .instructions
                 .push(IrInstruction::Return { value: None });
@@ -453,6 +591,7 @@ impl AstToIrLowering {
         self.block_counter = 0;
         self.current_blocks.clear();
         self.local_vars.clear();
+        self.declared_locals.clear();
         self.static_vars.clear();
         self.temp_types.clear();
         self.for_exit_stack.clear();
@@ -539,6 +678,7 @@ impl AstToIrLowering {
                 dest: ret_val_temp,
                 src: Operand::Local(func.name.clone()),
             });
+            self.emit_local_reference_cleanup();
             self.current_blocks[last_idx].instructions.push(IrInstruction::Return {
                 value: Some(Operand::Temp(ret_val_temp)),
             });
@@ -548,6 +688,362 @@ impl AstToIrLowering {
             name: func.name.clone(),
             params,
             return_type: Some(ret_ty),
+            blocks: self.current_blocks.clone(),
+        }
+    }
+
+    fn emit_local_reference_cleanup(&mut self) {
+        let vars: Vec<(String, VbType)> = self
+            .declared_locals
+            .iter()
+            .filter(|(_, ty)| ty.is_reference())
+            .cloned()
+            .collect();
+        for (name, ty) in vars {
+            let temp = self.next_temp();
+            self.temp_types.insert(temp, ty);
+            self.emit(IrInstruction::Load {
+                dest: temp,
+                src: Operand::Local(name),
+            });
+            self.emit(IrInstruction::Release {
+                object: Operand::Temp(temp),
+            });
+        }
+    }
+
+    fn lower_class_sub(&mut self, class_name: &str, sub: &SubDeclaration) -> IrFunction {
+        self.temp_counter = 0;
+        self.block_counter = 0;
+        self.current_blocks.clear();
+        self.local_vars.clear();
+        self.declared_locals.clear();
+        self.static_vars.clear();
+        self.temp_types.clear();
+        self.for_exit_stack.clear();
+        self.do_exit_stack.clear();
+        self.current_class = Some(class_name.to_string());
+        self.current_procedure_name = Some(sub.name.clone());
+
+        let entry_idx = self.create_block("entry");
+        self.switch_to_block(entry_idx);
+
+        let mut params = Vec::new();
+        // Parameter 0: this
+        params.push(IrParam {
+            name: "this".to_string(),
+            vb_type: VbType::Class(class_name.to_string()),
+            is_by_val: true,
+            is_optional: false,
+            is_param_array: false,
+        });
+        self.local_vars.insert("THIS".to_string(), ("this".to_string(), VbType::Class(class_name.to_string())));
+        self.local_vars.insert("ME".to_string(), ("this".to_string(), VbType::Class(class_name.to_string())));
+        let temp_this = self.next_temp();
+        self.emit(IrInstruction::AllocLocal {
+            dest: temp_this,
+            name: "this".to_string(),
+            vb_type: VbType::Class(class_name.to_string()),
+        });
+
+        for p in &sub.params {
+            let mut ty = p
+                .param_type
+                .as_ref()
+                .map(|ts| self.resolve_type_spec(ts))
+                .unwrap_or(VbType::Variant);
+            if let Some(ref pt) = p.param_type {
+                if !pt.array_dimensions.is_empty() {
+                    ty = VbType::Array(Box::new(ty));
+                }
+            }
+            params.push(IrParam {
+                name: p.name.clone(),
+                vb_type: ty.clone(),
+                is_by_val: p.is_by_val,
+                is_optional: p.is_optional,
+                is_param_array: p.is_param_array,
+            });
+            self.local_vars.insert(p.name.to_ascii_uppercase(), (p.name.clone(), ty.clone()));
+            let temp = self.next_temp();
+            self.emit(IrInstruction::AllocLocal {
+                dest: temp,
+                name: p.name.clone(),
+                vb_type: ty,
+            });
+        }
+
+        for stmt in &sub.body {
+            self.lower_statement(stmt);
+        }
+
+        let last_idx = self.current_blocks.len() - 1;
+        let needs_return = if let Some(last_inst) = self.current_blocks[last_idx].instructions.last() {
+            !matches!(last_inst, IrInstruction::Return { .. } | IrInstruction::Branch { .. })
+        } else {
+            true
+        };
+
+        if needs_return {
+            self.emit_local_reference_cleanup();
+            self.current_blocks[last_idx]
+                .instructions
+                .push(IrInstruction::Return { value: None });
+        }
+
+        self.current_class = None;
+
+        IrFunction {
+            name: format!("{}__{}", class_name, sub.name),
+            params,
+            return_type: None,
+            blocks: self.current_blocks.clone(),
+        }
+    }
+
+    fn lower_class_function(&mut self, class_name: &str, func: &FunctionDeclaration) -> IrFunction {
+        self.temp_counter = 0;
+        self.block_counter = 0;
+        self.current_blocks.clear();
+        self.local_vars.clear();
+        self.declared_locals.clear();
+        self.static_vars.clear();
+        self.temp_types.clear();
+        self.for_exit_stack.clear();
+        self.do_exit_stack.clear();
+        self.current_class = Some(class_name.to_string());
+        self.current_procedure_name = Some(func.name.clone());
+
+        let entry_idx = self.create_block("entry");
+        self.switch_to_block(entry_idx);
+
+        let mut params = Vec::new();
+        // Parameter 0: this
+        params.push(IrParam {
+            name: "this".to_string(),
+            vb_type: VbType::Class(class_name.to_string()),
+            is_by_val: true,
+            is_optional: false,
+            is_param_array: false,
+        });
+        self.local_vars.insert("THIS".to_string(), ("this".to_string(), VbType::Class(class_name.to_string())));
+        self.local_vars.insert("ME".to_string(), ("this".to_string(), VbType::Class(class_name.to_string())));
+        let temp_this = self.next_temp();
+        self.emit(IrInstruction::AllocLocal {
+            dest: temp_this,
+            name: "this".to_string(),
+            vb_type: VbType::Class(class_name.to_string()),
+        });
+
+        for p in &func.params {
+            let mut ty = p
+                .param_type
+                .as_ref()
+                .map(|ts| self.resolve_type_spec(ts))
+                .unwrap_or(VbType::Variant);
+            if let Some(ref pt) = p.param_type {
+                if !pt.array_dimensions.is_empty() {
+                    ty = VbType::Array(Box::new(ty));
+                }
+            }
+            params.push(IrParam {
+                name: p.name.clone(),
+                vb_type: ty.clone(),
+                is_by_val: p.is_by_val,
+                is_optional: p.is_optional,
+                is_param_array: p.is_param_array,
+            });
+            self.local_vars.insert(p.name.to_ascii_uppercase(), (p.name.clone(), ty.clone()));
+            let temp = self.next_temp();
+            self.emit(IrInstruction::AllocLocal {
+                dest: temp,
+                name: p.name.clone(),
+                vb_type: ty,
+            });
+        }
+
+        let ret_ty = func
+            .return_type
+            .as_ref()
+            .map(|ts| self.resolve_type_spec(ts))
+            .unwrap_or(VbType::Variant);
+
+        self.local_vars.insert(
+            func.name.to_ascii_uppercase(),
+            (func.name.clone(), ret_ty.clone()),
+        );
+        let ret_temp = self.next_temp();
+        self.emit(IrInstruction::AllocLocal {
+            dest: ret_temp,
+            name: func.name.clone(),
+            vb_type: ret_ty.clone(),
+        });
+        let def_const = default_constant_for_type(&ret_ty);
+        self.emit(IrInstruction::Store {
+            dest: Operand::Local(func.name.clone()),
+            src: Operand::Constant(def_const),
+        });
+
+        for stmt in &func.body {
+            self.lower_statement(stmt);
+        }
+
+        let last_idx = self.current_blocks.len() - 1;
+        let needs_return = if let Some(last_inst) = self.current_blocks[last_idx].instructions.last() {
+            !matches!(last_inst, IrInstruction::Return { .. } | IrInstruction::Branch { .. })
+        } else {
+            true
+        };
+
+        if needs_return {
+            let ret_val_temp = self.next_temp();
+            self.current_blocks[last_idx].instructions.push(IrInstruction::Load {
+                dest: ret_val_temp,
+                src: Operand::Local(func.name.clone()),
+            });
+            self.emit_local_reference_cleanup();
+            self.current_blocks[last_idx].instructions.push(IrInstruction::Return {
+                value: Some(Operand::Temp(ret_val_temp)),
+            });
+        }
+
+        self.current_class = None;
+
+        IrFunction {
+            name: format!("{}__{}", class_name, func.name),
+            params,
+            return_type: Some(ret_ty),
+            blocks: self.current_blocks.clone(),
+        }
+    }
+
+    fn lower_class_property(&mut self, class_name: &str, prop: &PropertyDeclaration) -> IrFunction {
+        self.temp_counter = 0;
+        self.block_counter = 0;
+        self.current_blocks.clear();
+        self.local_vars.clear();
+        self.declared_locals.clear();
+        self.static_vars.clear();
+        self.temp_types.clear();
+        self.for_exit_stack.clear();
+        self.do_exit_stack.clear();
+        self.current_class = Some(class_name.to_string());
+        self.current_procedure_name = Some(prop.name.clone());
+
+        let entry_idx = self.create_block("entry");
+        self.switch_to_block(entry_idx);
+
+        let mut params = Vec::new();
+        // Parameter 0: this
+        params.push(IrParam {
+            name: "this".to_string(),
+            vb_type: VbType::Class(class_name.to_string()),
+            is_by_val: true,
+            is_optional: false,
+            is_param_array: false,
+        });
+        self.local_vars.insert("THIS".to_string(), ("this".to_string(), VbType::Class(class_name.to_string())));
+        self.local_vars.insert("ME".to_string(), ("this".to_string(), VbType::Class(class_name.to_string())));
+        let temp_this = self.next_temp();
+        self.emit(IrInstruction::AllocLocal {
+            dest: temp_this,
+            name: "this".to_string(),
+            vb_type: VbType::Class(class_name.to_string()),
+        });
+
+        for p in &prop.params {
+            let mut ty = p
+                .param_type
+                .as_ref()
+                .map(|ts| self.resolve_type_spec(ts))
+                .unwrap_or(VbType::Variant);
+            if let Some(ref pt) = p.param_type {
+                if !pt.array_dimensions.is_empty() {
+                    ty = VbType::Array(Box::new(ty));
+                }
+            }
+            params.push(IrParam {
+                name: p.name.clone(),
+                vb_type: ty.clone(),
+                is_by_val: p.is_by_val,
+                is_optional: p.is_optional,
+                is_param_array: p.is_param_array,
+            });
+            self.local_vars.insert(p.name.to_ascii_uppercase(), (p.name.clone(), ty.clone()));
+            let temp = self.next_temp();
+            self.emit(IrInstruction::AllocLocal {
+                dest: temp,
+                name: p.name.clone(),
+                vb_type: ty,
+            });
+        }
+
+        let ret_ty = prop
+            .return_type
+            .as_ref()
+            .map(|ts| self.resolve_type_spec(ts))
+            .unwrap_or(VbType::Variant);
+
+        if prop.kind == PropertyKind::Get {
+            self.local_vars.insert(
+                prop.name.to_ascii_uppercase(),
+                (prop.name.clone(), ret_ty.clone()),
+            );
+            let ret_temp = self.next_temp();
+            self.emit(IrInstruction::AllocLocal {
+                dest: ret_temp,
+                name: prop.name.clone(),
+                vb_type: ret_ty.clone(),
+            });
+            let def_const = default_constant_for_type(&ret_ty);
+            self.emit(IrInstruction::Store {
+                dest: Operand::Local(prop.name.clone()),
+                src: Operand::Constant(def_const),
+            });
+        }
+
+        for stmt in &prop.body {
+            self.lower_statement(stmt);
+        }
+
+        let last_idx = self.current_blocks.len() - 1;
+        let needs_return = if let Some(last_inst) = self.current_blocks[last_idx].instructions.last() {
+            !matches!(last_inst, IrInstruction::Return { .. } | IrInstruction::Branch { .. })
+        } else {
+            true
+        };
+
+        if needs_return {
+            if prop.kind == PropertyKind::Get {
+                let ret_val_temp = self.next_temp();
+                self.current_blocks[last_idx].instructions.push(IrInstruction::Load {
+                    dest: ret_val_temp,
+                    src: Operand::Local(prop.name.clone()),
+                });
+                self.emit_local_reference_cleanup();
+                self.current_blocks[last_idx].instructions.push(IrInstruction::Return {
+                    value: Some(Operand::Temp(ret_val_temp)),
+                });
+            } else {
+                self.emit_local_reference_cleanup();
+                self.current_blocks[last_idx]
+                    .instructions
+                    .push(IrInstruction::Return { value: None });
+            }
+        }
+
+        self.current_class = None;
+
+        let suffix = match prop.kind {
+            PropertyKind::Get => "Get",
+            PropertyKind::Let => "Let",
+            PropertyKind::Set => "Set",
+        };
+
+        IrFunction {
+            name: format!("{}__{}__{}", class_name, prop.name, suffix),
+            params,
+            return_type: if prop.kind == PropertyKind::Get { Some(ret_ty) } else { None },
             blocks: self.current_blocks.clone(),
         }
     }
@@ -652,6 +1148,7 @@ impl AstToIrLowering {
 
                             let key = v.name.to_ascii_uppercase();
                             self.local_vars.insert(key, (v.name.clone(), vb_type.clone()));
+                            self.declared_locals.push((v.name.clone(), vb_type.clone()));
 
                             let dest = self.next_temp();
                             self.emit(IrInstruction::AllocLocal {
@@ -702,6 +1199,25 @@ impl AstToIrLowering {
                                     dest: Operand::Local(v.name.clone()),
                                     src: init_op,
                                 });
+                            } else if let Some(ref ts) = v.type_spec {
+                                if ts.is_new {
+                                    let new_dest = self.next_temp();
+                                    self.temp_types.insert(new_dest, vb_type.clone());
+                                    self.emit(IrInstruction::NewObject {
+                                        dest: new_dest,
+                                        class_name: ts.name.clone(),
+                                    });
+                                    self.emit(IrInstruction::Store {
+                                        dest: Operand::Local(v.name.clone()),
+                                        src: Operand::Temp(new_dest),
+                                    });
+                                } else if !matches!(vb_type, VbType::UserDefined(_)) {
+                                    let def_const = default_constant_for_type(&vb_type);
+                                    self.emit(IrInstruction::Store {
+                                        dest: Operand::Local(v.name.clone()),
+                                        src: Operand::Constant(def_const),
+                                    });
+                                }
                             } else if !matches!(vb_type, VbType::UserDefined(_)) {
                                 let def_const = default_constant_for_type(&vb_type);
                                 self.emit(IrInstruction::Store {
@@ -713,8 +1229,41 @@ impl AstToIrLowering {
                     }
                 }
             }
-            Statement::Assignment { target, value, .. } => {
+            Statement::Assignment { target, value, is_set, .. } => {
                 if let Expression::MemberAccess { object, member } = target {
+                    let obj_op = self.lower_expression(object);
+                    let obj_ty = self.infer_operand_type(&obj_op);
+                    if let VbType::Class(ref cls_name) = obj_ty {
+                        let prop_info = self.class_layouts.get(&cls_name.to_ascii_uppercase())
+                            .and_then(|l| l.find_property(member).map(|p| (p.has_set, p.prop_type.is_reference())));
+                        if let Some((has_set, prop_is_ref)) = prop_info {
+                            let val_op = self.lower_expression(value);
+                            let prop_fn = if has_set && (*is_set || prop_is_ref) {
+                                format!("{}__{}__Set", cls_name, member)
+                            } else {
+                                format!("{}__{}__Let", cls_name, member)
+                            };
+                            let actual_base = match obj_op {
+                                Operand::Local(_) => {
+                                    let dest = self.next_temp();
+                                    self.temp_types.insert(dest, VbType::Class(cls_name.clone()));
+                                    self.emit(IrInstruction::Load {
+                                        dest,
+                                        src: obj_op,
+                                    });
+                                    Operand::Temp(dest)
+                                }
+                                _ => obj_op,
+                            };
+                            self.emit(IrInstruction::Call {
+                                dest: None,
+                                name: prop_fn,
+                                args: vec![actual_base, val_op],
+                                return_type: None,
+                            });
+                            return;
+                        }
+                    }
                     if let Some((base_op, offset, member_type)) = self.resolve_member_access(object, member) {
                         let val_op = self.lower_expression(value);
                         let val_ty = self.infer_operand_type(&val_op);
@@ -757,6 +1306,63 @@ impl AstToIrLowering {
                         return;
                     }
                 } else if let Expression::WithMemberAccess(member) = target {
+                    if let Some(ctx) = self.with_stack.last().cloned() {
+                        if let VbType::Class(ref cls_name) = ctx.vb_type {
+                            let prop_info = self.class_layouts.get(&cls_name.to_ascii_uppercase())
+                                .and_then(|l| l.find_property(member).map(|p| (p.has_set, p.prop_type.is_reference())));
+                            if let Some((has_set, prop_is_ref)) = prop_info {
+                                let val_op = self.lower_expression(value);
+                                let prop_fn = if has_set && (*is_set || prop_is_ref) {
+                                    format!("{}__{}__Set", cls_name, member)
+                                } else {
+                                    format!("{}__{}__Let", cls_name, member)
+                                };
+                                let actual_base = match ctx.base_operand {
+                                    Operand::Local(_) => {
+                                        let dest = self.next_temp();
+                                        self.temp_types.insert(dest, VbType::Class(cls_name.clone()));
+                                        self.emit(IrInstruction::Load {
+                                            dest,
+                                            src: ctx.base_operand,
+                                        });
+                                        Operand::Temp(dest)
+                                    }
+                                    _ => ctx.base_operand,
+                                };
+                                self.emit(IrInstruction::Call {
+                                    dest: None,
+                                    name: prop_fn,
+                                    args: vec![actual_base, val_op],
+                                    return_type: None,
+                                });
+                                return;
+                            } else if let Some((offset, member_type)) = self.class_layouts.get(&cls_name.to_ascii_uppercase())
+                                .and_then(|l| l.find_field(member).map(|f| (f.offset, f.vb_type.clone())))
+                            {
+                                let actual_base = match ctx.base_operand {
+                                    Operand::Local(_) => {
+                                        let dest = self.next_temp();
+                                        self.temp_types.insert(dest, VbType::Class(cls_name.clone()));
+                                        self.emit(IrInstruction::Load {
+                                            dest,
+                                            src: ctx.base_operand,
+                                        });
+                                        Operand::Temp(dest)
+                                    }
+                                    _ => ctx.base_operand,
+                                };
+                                let val_op = self.lower_expression(value);
+                                self.emit(IrInstruction::SetMember {
+                                    base: actual_base,
+                                    offset,
+                                    value: val_op,
+                                    member_type,
+                                });
+                                return;
+                            }
+                        }
+                    }
+
                     let with_res = if let Some(ctx) = self.with_stack.last().cloned() {
                         let struct_name = match &ctx.vb_type {
                             VbType::UserDefined(s) => s.clone(),
@@ -864,6 +1470,55 @@ impl AstToIrLowering {
                         elem_type,
                     });
                 } else {
+                    if let Expression::Variable(name) = target {
+                        if let Some(cls_name) = self.current_class.clone() {
+                            if !self.local_vars.contains_key(&name.to_ascii_uppercase()) {
+                                let prop_info = self.class_layouts.get(&cls_name.to_ascii_uppercase())
+                                    .and_then(|l| l.find_property(name).map(|p| (p.has_set, p.prop_type.is_reference())));
+                                if let Some((has_set, prop_is_ref)) = prop_info {
+                                    let val_op = self.lower_expression(value);
+                                    let prop_fn = if has_set && (*is_set || prop_is_ref) {
+                                        format!("{}__{}__Set", cls_name, name)
+                                    } else {
+                                        format!("{}__{}__Let", cls_name, name)
+                                    };
+                                    let this_temp = self.next_temp();
+                                    self.temp_types.insert(this_temp, VbType::Class(cls_name.clone()));
+                                    self.emit(IrInstruction::Load {
+                                        dest: this_temp,
+                                        src: Operand::Local("this".to_string()),
+                                    });
+                                    self.emit(IrInstruction::Call {
+                                        dest: None,
+                                        name: prop_fn,
+                                        args: vec![Operand::Temp(this_temp), val_op],
+                                        return_type: None,
+                                    });
+                                    return;
+                                }
+
+                                if let Some((f_offset, f_type)) = self.class_layouts.get(&cls_name.to_ascii_uppercase())
+                                    .and_then(|l| l.find_field(name).map(|f| (f.offset, f.vb_type.clone())))
+                                {
+                                    let val_op = self.lower_expression(value);
+                                    let this_temp = self.next_temp();
+                                    self.temp_types.insert(this_temp, VbType::Class(cls_name.clone()));
+                                    self.emit(IrInstruction::Load {
+                                        dest: this_temp,
+                                        src: Operand::Local("this".to_string()),
+                                    });
+                                    self.emit(IrInstruction::SetMember {
+                                        base: Operand::Temp(this_temp),
+                                        offset: f_offset,
+                                        value: val_op,
+                                        member_type: f_type,
+                                    });
+                                    return;
+                                }
+                            }
+                        }
+                    }
+
                     let (target_op, target_ty) = match target {
                         Expression::Variable(name) => self.resolve_variable(name),
                         _ => (Operand::Local("Unknown".to_string()), VbType::Unknown),
@@ -892,7 +1547,7 @@ impl AstToIrLowering {
                                     dest: cast_temp,
                                     src: val_op,
                                     from_type: val_ty,
-                                    to_type: target_ty,
+                                    to_type: target_ty.clone(),
                                 });
                                 Operand::Temp(cast_temp)
                             }
@@ -901,10 +1556,31 @@ impl AstToIrLowering {
                         val_op
                     };
 
-                    self.emit(IrInstruction::Store {
-                        dest: target_op,
-                        src: final_val_op,
-                    });
+                    if target_ty.is_reference() || *is_set {
+                        let old_val_temp = self.next_temp();
+                        self.temp_types.insert(old_val_temp, target_ty.clone());
+                        self.emit(IrInstruction::Load {
+                            dest: old_val_temp,
+                            src: target_op.clone(),
+                        });
+                        if !matches!(value, Expression::New(_)) {
+                            self.emit(IrInstruction::AddRef {
+                                object: final_val_op.clone(),
+                            });
+                        }
+                        self.emit(IrInstruction::Store {
+                            dest: target_op,
+                            src: final_val_op,
+                        });
+                        self.emit(IrInstruction::Release {
+                            object: Operand::Temp(old_val_temp),
+                        });
+                    } else {
+                        self.emit(IrInstruction::Store {
+                            dest: target_op,
+                            src: final_val_op,
+                        });
+                    }
                 }
             }
             Statement::If {
@@ -1502,10 +2178,71 @@ impl AstToIrLowering {
             Statement::Call {
                 name, arguments, ..
             } => {
-                let args_ops = arguments
+                let mut args_ops: Vec<Operand> = arguments
                     .iter()
                     .map(|arg| self.lower_expression(arg))
                     .collect();
+
+                if name.contains('.') {
+                    let parts: Vec<&str> = name.split('.').collect();
+                    if parts.len() == 2 {
+                        let obj_name = parts[0];
+                        let method_name = parts[1];
+                        let (base_op, cls_name) = if obj_name.eq_ignore_ascii_case("Me") {
+                            let this_temp = self.next_temp();
+                            let cls = self.current_class.clone().unwrap_or_default();
+                            self.temp_types.insert(this_temp, VbType::Class(cls.clone()));
+                            self.emit(IrInstruction::Load {
+                                dest: this_temp,
+                                src: Operand::Local("this".to_string()),
+                            });
+                            (Operand::Temp(this_temp), cls)
+                        } else {
+                            let (target_op, target_ty) = self.resolve_variable(obj_name);
+                            let cls = match target_ty {
+                                VbType::Class(c) => c,
+                                _ => "".to_string(),
+                            };
+                            let dest = self.next_temp();
+                            self.temp_types.insert(dest, VbType::Class(cls.clone()));
+                            self.emit(IrInstruction::Load {
+                                dest,
+                                src: target_op,
+                            });
+                            (Operand::Temp(dest), cls)
+                        };
+                        args_ops.insert(0, base_op);
+                        self.emit(IrInstruction::Call {
+                            dest: None,
+                            name: format!("{}__{}", cls_name, method_name),
+                            args: args_ops,
+                            return_type: None,
+                        });
+                        return;
+                    }
+                }
+
+                if let Some(cls_name) = self.current_class.clone() {
+                    let is_method = self.class_layouts.get(&cls_name.to_ascii_uppercase())
+                        .map_or(false, |l| l.find_method(name).is_some());
+                    if is_method {
+                        let this_temp = self.next_temp();
+                        self.temp_types.insert(this_temp, VbType::Class(cls_name.clone()));
+                        self.emit(IrInstruction::Load {
+                            dest: this_temp,
+                            src: Operand::Local("this".to_string()),
+                        });
+                        args_ops.insert(0, Operand::Temp(this_temp));
+                        self.emit(IrInstruction::Call {
+                            dest: None,
+                            name: format!("{}__{}", cls_name, name),
+                            args: args_ops,
+                            return_type: None,
+                        });
+                        return;
+                    }
+                }
+
                 self.emit(IrInstruction::Call {
                     dest: None,
                     name: name.clone(),
@@ -1579,6 +2316,50 @@ impl AstToIrLowering {
                 Literal::Nothing => Operand::Constant(IrConstant::Nothing),
             },
             Expression::Variable(name) => {
+                if let Some(cls_name) = self.current_class.clone() {
+                    if !self.local_vars.contains_key(&name.to_ascii_uppercase()) {
+                        let prop_info = self.class_layouts.get(&cls_name.to_ascii_uppercase())
+                            .and_then(|l| l.find_property(name).cloned());
+                        if let Some(p) = prop_info {
+                            let this_temp = self.next_temp();
+                            self.temp_types.insert(this_temp, VbType::Class(cls_name.clone()));
+                            self.emit(IrInstruction::Load {
+                                dest: this_temp,
+                                src: Operand::Local("this".to_string()),
+                            });
+                            let dest = self.next_temp();
+                            self.temp_types.insert(dest, p.prop_type.clone());
+                            self.emit(IrInstruction::Call {
+                                dest: Some(dest),
+                                name: format!("{}__{}__Get", cls_name, name),
+                                args: vec![Operand::Temp(this_temp)],
+                                return_type: Some(p.prop_type),
+                            });
+                            return Operand::Temp(dest);
+                        }
+
+                        let field_info = self.class_layouts.get(&cls_name.to_ascii_uppercase())
+                            .and_then(|l| l.find_field(name).map(|f| (f.offset, f.vb_type.clone())));
+                        if let Some((f_offset, f_type)) = field_info {
+                            let this_temp = self.next_temp();
+                            self.temp_types.insert(this_temp, VbType::Class(cls_name.clone()));
+                            self.emit(IrInstruction::Load {
+                                dest: this_temp,
+                                src: Operand::Local("this".to_string()),
+                            });
+                            let dest = self.next_temp();
+                            self.temp_types.insert(dest, f_type.clone());
+                            self.emit(IrInstruction::GetMember {
+                                dest,
+                                base: Operand::Temp(this_temp),
+                                offset: f_offset,
+                                member_type: f_type,
+                            });
+                            return Operand::Temp(dest);
+                        }
+                    }
+                }
+
                 let (target_op, target_ty) = self.resolve_variable(name);
                 if matches!(target_ty, VbType::UserDefined(_)) {
                     return target_op;
@@ -1655,6 +2436,15 @@ impl AstToIrLowering {
                             op: cmp_op,
                             left: l_op,
                             right: r_op,
+                        });
+                    }
+                    BinaryOperator::Is => {
+                        self.temp_types.insert(dest, VbType::Boolean);
+                        self.emit(IrInstruction::Compare {
+                            dest,
+                            op: IrCompareOp::Is,
+                            left: left_op,
+                            right: right_op,
                         });
                     }
                     BinaryOperator::Add => {
@@ -1928,11 +2718,23 @@ impl AstToIrLowering {
                         UnaryOperator::Not => IrUnaryOp::BitNot,
                         UnaryOperator::Plus => return opnd,
                     };
+                    let res_ty = if opnd_ty == VbType::Boolean {
+                        VbType::Boolean
+                    } else if opnd_ty == VbType::Integer {
+                        VbType::Integer
+                    } else if opnd_ty == VbType::Byte {
+                        VbType::Byte
+                    } else if opnd_ty == VbType::Long {
+                        VbType::Long
+                    } else {
+                        opnd_ty.clone()
+                    };
+                    self.temp_types.insert(dest, res_ty.clone());
                     self.emit(IrInstruction::UnaryOp {
                         dest,
                         op: ir_op,
                         operand: opnd,
-                        result_type: VbType::Long,
+                        result_type: res_ty,
                     });
                 }
                 Operand::Temp(dest)
@@ -2346,8 +3148,110 @@ impl AstToIrLowering {
                     }
                 }
 
-                // 3. Check function call
+                // Check if target is a class method call: p.Method(args)
+                if let Expression::MemberAccess { object, member } = &**target {
+                    let obj_op = self.lower_expression(object);
+                    let obj_ty = self.infer_operand_type(&obj_op);
+                    if let VbType::Class(ref cls_name) = obj_ty {
+                        let method_info = self.class_layouts.get(&cls_name.to_ascii_uppercase())
+                            .and_then(|l| l.find_method(member).cloned());
+                        if let Some(m) = method_info {
+                            let actual_base = match obj_op {
+                                Operand::Local(_) => {
+                                    let b_dest = self.next_temp();
+                                    self.temp_types.insert(b_dest, VbType::Class(cls_name.clone()));
+                                    self.emit(IrInstruction::Load {
+                                        dest: b_dest,
+                                        src: obj_op,
+                                    });
+                                    Operand::Temp(b_dest)
+                                }
+                                _ => obj_op,
+                            };
+                            let mut args_ops = vec![actual_base];
+                            for idx in indices {
+                                args_ops.push(self.lower_expression(idx));
+                            }
+                            let ret_ty = m.return_type.unwrap_or(VbType::Variant);
+                            let dest = self.next_temp();
+                            self.temp_types.insert(dest, ret_ty.clone());
+                            self.emit(IrInstruction::Call {
+                                dest: Some(dest),
+                                name: format!("{}__{}", cls_name, member),
+                                args: args_ops,
+                                return_type: Some(ret_ty),
+                            });
+                            return Operand::Temp(dest);
+                        }
+                    }
+                }
+
+                if let Expression::WithMemberAccess(member) = &**target {
+                    if let Some(ctx) = self.with_stack.last().cloned() {
+                        if let VbType::Class(ref cls_name) = ctx.vb_type {
+                            let method_info = self.class_layouts.get(&cls_name.to_ascii_uppercase())
+                                .and_then(|l| l.find_method(member).cloned());
+                            if let Some(m) = method_info {
+                                let actual_base = match ctx.base_operand {
+                                    Operand::Local(_) => {
+                                        let b_dest = self.next_temp();
+                                        self.temp_types.insert(b_dest, VbType::Class(cls_name.clone()));
+                                        self.emit(IrInstruction::Load {
+                                            dest: b_dest,
+                                            src: ctx.base_operand,
+                                        });
+                                        Operand::Temp(b_dest)
+                                    }
+                                    _ => ctx.base_operand,
+                                };
+                                let mut args_ops = vec![actual_base];
+                                for idx in indices {
+                                    args_ops.push(self.lower_expression(idx));
+                                }
+                                let ret_ty = m.return_type.unwrap_or(VbType::Variant);
+                                let dest = self.next_temp();
+                                self.temp_types.insert(dest, ret_ty.clone());
+                                self.emit(IrInstruction::Call {
+                                    dest: Some(dest),
+                                    name: format!("{}__{}", cls_name, member),
+                                    args: args_ops,
+                                    return_type: Some(ret_ty),
+                                });
+                                return Operand::Temp(dest);
+                            }
+                        }
+                    }
+                }
+
+                // Check function call or current_class method
                 if let Expression::Variable(name) = &**target {
+                    if let Some(cls_name) = self.current_class.clone() {
+                        let method_info = self.class_layouts.get(&cls_name.to_ascii_uppercase())
+                            .and_then(|l| l.find_method(name).cloned());
+                        if let Some(m) = method_info {
+                            let this_temp = self.next_temp();
+                            self.temp_types.insert(this_temp, VbType::Class(cls_name.clone()));
+                            self.emit(IrInstruction::Load {
+                                dest: this_temp,
+                                src: Operand::Local("this".to_string()),
+                            });
+                            let mut args_ops = vec![Operand::Temp(this_temp)];
+                            for idx in indices {
+                                args_ops.push(self.lower_expression(idx));
+                            }
+                            let ret_ty = m.return_type.unwrap_or(VbType::Variant);
+                            let dest = self.next_temp();
+                            self.temp_types.insert(dest, ret_ty.clone());
+                            self.emit(IrInstruction::Call {
+                                dest: Some(dest),
+                                name: format!("{}__{}", cls_name, name),
+                                args: args_ops,
+                                return_type: Some(ret_ty),
+                            });
+                            return Operand::Temp(dest);
+                        }
+                    }
+
                     let key = name.to_ascii_uppercase();
                     if let Some((func_real_name, ret_ty)) = self.functions.get(&key).cloned() {
                         let args_ops: Vec<Operand> = indices.iter().map(|arg| self.lower_expression(arg)).collect();
@@ -2363,7 +3267,7 @@ impl AstToIrLowering {
                     }
                 }
 
-                // 3. Array element indexing
+                // Array element indexing
                 let arr_op = self.lower_expression(target);
                 let arr_ty = self.infer_operand_type(&arr_op);
                 let elem_type = match arr_ty {
@@ -2390,6 +3294,64 @@ impl AstToIrLowering {
                         }
                     }
                 }
+
+                let obj_op = self.lower_expression(object);
+                let obj_ty = self.infer_operand_type(&obj_op);
+                if let VbType::Class(ref cls_name) = obj_ty {
+                    let prop_info = self.class_layouts.get(&cls_name.to_ascii_uppercase())
+                        .and_then(|l| l.find_property(member).cloned());
+                    if let Some(p) = prop_info {
+                        let dest = self.next_temp();
+                        self.temp_types.insert(dest, p.prop_type.clone());
+                        let actual_base = match obj_op {
+                            Operand::Local(_) => {
+                                let b_dest = self.next_temp();
+                                self.temp_types.insert(b_dest, VbType::Class(cls_name.clone()));
+                                self.emit(IrInstruction::Load {
+                                    dest: b_dest,
+                                    src: obj_op,
+                                });
+                                Operand::Temp(b_dest)
+                            }
+                            _ => obj_op,
+                        };
+                        self.emit(IrInstruction::Call {
+                            dest: Some(dest),
+                            name: format!("{}__{}__Get", cls_name, member),
+                            args: vec![actual_base],
+                            return_type: Some(p.prop_type),
+                        });
+                        return Operand::Temp(dest);
+                    }
+
+                    let method_info = self.class_layouts.get(&cls_name.to_ascii_uppercase())
+                        .and_then(|l| l.find_method(member).cloned());
+                    if let Some(m) = method_info {
+                        let dest = self.next_temp();
+                        let ret_ty = m.return_type.unwrap_or(VbType::Variant);
+                        self.temp_types.insert(dest, ret_ty.clone());
+                        let actual_base = match obj_op {
+                            Operand::Local(_) => {
+                                let b_dest = self.next_temp();
+                                self.temp_types.insert(b_dest, VbType::Class(cls_name.clone()));
+                                self.emit(IrInstruction::Load {
+                                    dest: b_dest,
+                                    src: obj_op,
+                                });
+                                Operand::Temp(b_dest)
+                            }
+                            _ => obj_op,
+                        };
+                        self.emit(IrInstruction::Call {
+                            dest: Some(dest),
+                            name: format!("{}__{}", cls_name, member),
+                            args: vec![actual_base],
+                            return_type: Some(ret_ty),
+                        });
+                        return Operand::Temp(dest);
+                    }
+                }
+
                 if let Some((base_op, offset, member_type)) = self.resolve_member_access(object, member) {
                     let dest = self.next_temp();
                     self.temp_types.insert(dest, member_type.clone());
@@ -2406,6 +3368,87 @@ impl AstToIrLowering {
             }
             Expression::WithMemberAccess(member) => {
                 if let Some(ctx) = self.with_stack.last().cloned() {
+                    if let VbType::Class(ref cls_name) = ctx.vb_type {
+                        let prop_info = self.class_layouts.get(&cls_name.to_ascii_uppercase())
+                            .and_then(|l| l.find_property(member).cloned());
+                        if let Some(p) = prop_info {
+                            let dest = self.next_temp();
+                            self.temp_types.insert(dest, p.prop_type.clone());
+                            let actual_base = match ctx.base_operand {
+                                Operand::Local(_) => {
+                                    let b_dest = self.next_temp();
+                                    self.temp_types.insert(b_dest, VbType::Class(cls_name.clone()));
+                                    self.emit(IrInstruction::Load {
+                                        dest: b_dest,
+                                        src: ctx.base_operand,
+                                    });
+                                    Operand::Temp(b_dest)
+                                }
+                                _ => ctx.base_operand,
+                            };
+                            self.emit(IrInstruction::Call {
+                                dest: Some(dest),
+                                name: format!("{}__{}__Get", cls_name, member),
+                                args: vec![actual_base],
+                                return_type: Some(p.prop_type),
+                            });
+                            return Operand::Temp(dest);
+                        }
+
+                        let method_info = self.class_layouts.get(&cls_name.to_ascii_uppercase())
+                            .and_then(|l| l.find_method(member).cloned());
+                        if let Some(m) = method_info {
+                            let dest = self.next_temp();
+                            let ret_ty = m.return_type.unwrap_or(VbType::Variant);
+                            self.temp_types.insert(dest, ret_ty.clone());
+                            let actual_base = match ctx.base_operand {
+                                Operand::Local(_) => {
+                                    let b_dest = self.next_temp();
+                                    self.temp_types.insert(b_dest, VbType::Class(cls_name.clone()));
+                                    self.emit(IrInstruction::Load {
+                                        dest: b_dest,
+                                        src: ctx.base_operand,
+                                    });
+                                    Operand::Temp(b_dest)
+                                }
+                                _ => ctx.base_operand,
+                            };
+                            self.emit(IrInstruction::Call {
+                                dest: Some(dest),
+                                name: format!("{}__{}", cls_name, member),
+                                args: vec![actual_base],
+                                return_type: Some(ret_ty),
+                            });
+                            return Operand::Temp(dest);
+                        }
+
+                        if let Some((offset, member_type)) = self.class_layouts.get(&cls_name.to_ascii_uppercase())
+                            .and_then(|l| l.find_field(member).map(|f| (f.offset, f.vb_type.clone())))
+                        {
+                            let dest = self.next_temp();
+                            self.temp_types.insert(dest, member_type.clone());
+                            let actual_base = match ctx.base_operand {
+                                Operand::Local(_) => {
+                                    let b_dest = self.next_temp();
+                                    self.temp_types.insert(b_dest, VbType::Class(cls_name.clone()));
+                                    self.emit(IrInstruction::Load {
+                                        dest: b_dest,
+                                        src: ctx.base_operand,
+                                    });
+                                    Operand::Temp(b_dest)
+                                }
+                                _ => ctx.base_operand,
+                            };
+                            self.emit(IrInstruction::GetMember {
+                                dest,
+                                base: actual_base,
+                                offset,
+                                member_type,
+                            });
+                            return Operand::Temp(dest);
+                        }
+                    }
+
                     let struct_name = match &ctx.vb_type {
                         VbType::UserDefined(s) => s.clone(),
                         _ => "".to_string(),
@@ -2432,6 +3475,25 @@ impl AstToIrLowering {
                     }
                 }
                 Operand::Constant(IrConstant::Int(0, VbType::Long))
+            }
+            Expression::New(cls) => {
+                let dest = self.next_temp();
+                self.temp_types.insert(dest, VbType::Class(cls.clone()));
+                self.emit(IrInstruction::NewObject {
+                    dest,
+                    class_name: cls.clone(),
+                });
+                Operand::Temp(dest)
+            }
+            Expression::Me => {
+                let temp = self.next_temp();
+                let ty = self.current_class.as_ref().map(|c| VbType::Class(c.clone())).unwrap_or(VbType::Object);
+                self.temp_types.insert(temp, ty);
+                self.emit(IrInstruction::Load {
+                    dest: temp,
+                    src: Operand::Local("this".to_string()),
+                });
+                Operand::Temp(temp)
             }
         }
     }

@@ -98,6 +98,20 @@ fn compile_single_source_file(
     let content = std::fs::read_to_string(source_path)
         .with_context(|| format!("Failed to read source file: {}", source_path.display()))?;
 
+    let ext = source_path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+
+    let (content, effective_module_name) = if ext == "cls" {
+        let cls_mod = vb6_project::CLSLoader::parse(&content, source_path, Some(module_name.to_string()));
+        let class_name = cls_mod.name.clone();
+        (format!("Class {}\n{}\nEnd Class\n", class_name, cls_mod.code), class_name)
+    } else {
+        (content, module_name.to_string())
+    };
+
     let ast = parse_source(&content)
         .map_err(|e| anyhow::anyhow!("Parser error: {}", e))?;
 
@@ -112,7 +126,7 @@ fn compile_single_source_file(
     }
 
     println!("Generating VB6 IR...");
-    let ir = compile_to_ir(&ast, module_name);
+    let ir = compile_to_ir(&ast, &effective_module_name);
 
     if args.emit_ir {
         let ir_text = vb6_compiler::ir::IrPrinter::print_module(&ir);
@@ -170,6 +184,14 @@ fn compile_vbp_project(
         println!("Reading module {}: {}", m.name, m.path.display());
         let mut ast = parse_source(&m.code)
             .map_err(|e| anyhow::anyhow!("Failed parsing {}: {}", m.name, e))?;
+        combined_declarations.append(&mut ast.declarations);
+    }
+
+    for c in &project.classes {
+        println!("Reading class module {}: {}", c.name, c.path.display());
+        let wrapped_code = format!("Class {}\n{}\nEnd Class\n", c.name, c.code);
+        let mut ast = parse_source(&wrapped_code)
+            .map_err(|e| anyhow::anyhow!("Failed parsing class {}: {}", c.name, e))?;
         combined_declarations.append(&mut ast.declarations);
     }
 

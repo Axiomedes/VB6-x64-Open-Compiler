@@ -17,6 +17,7 @@ pub struct IrModule {
     pub globals: Vec<IrGlobal>,
     pub functions: Vec<IrFunction>,
     pub udt_layouts: std::collections::HashMap<String, crate::types::UdtLayout>,
+    pub class_layouts: std::collections::HashMap<String, crate::types::ClassLayout>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -257,5 +258,18 @@ pub enum IrInstruction {
         offset: usize,
         value: Operand,
         member_type: VbType,
+    },
+    /// Create new class instance: `%dest = NEW_OBJECT "ClassName"`
+    NewObject {
+        dest: usize,
+        class_name: String,
+    },
+    /// Increment reference count of object: `ADDREF %obj`
+    AddRef {
+        object: Operand,
+    },
+    /// Decrement reference count of object (and free if 0): `RELEASE %obj`
+    Release {
+        object: Operand,
     },
 }

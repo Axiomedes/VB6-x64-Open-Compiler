@@ -82,6 +82,8 @@ pub struct SemanticAnalyzer {
     pub option_explicit: bool,
     pub udt_layouts: HashMap<String, crate::types::UdtLayout>,
     pub enum_defs: HashMap<String, crate::types::EnumDefinition>,
+    pub class_layouts: HashMap<String, crate::types::ClassLayout>,
+    pub current_class: Option<String>,
     pub with_stack: Vec<VbType>,
     loop_depth_for: usize,
     loop_depth_do: usize,
@@ -101,6 +103,8 @@ impl SemanticAnalyzer {
             option_explicit: false,
             udt_layouts: HashMap::new(),
             enum_defs: HashMap::new(),
+            class_layouts: HashMap::new(),
+            current_class: None,
             with_stack: Vec::new(),
             loop_depth_for: 0,
             loop_depth_do: 0,
@@ -113,6 +117,8 @@ impl SemanticAnalyzer {
             VbType::Enum(ts.name.clone())
         } else if self.udt_layouts.contains_key(&key) {
             VbType::UserDefined(ts.name.clone())
+        } else if self.class_layouts.contains_key(&key) {
+            VbType::Class(ts.name.clone())
         } else if let Some(len) = ts.fixed_length {
             if ts.name.eq_ignore_ascii_case("String") {
                 VbType::FixedString(len)
@@ -127,16 +133,99 @@ impl SemanticAnalyzer {
     pub fn analyze_file(&mut self, file: &SourceFile) -> Result<(), Vec<SemanticError>> {
         self.symbol_table.enter_scope(ScopeKind::Module);
 
+        // Pre-pass 0: register all Class declarations so their names and member layouts are known
+        for decl in &file.declarations {
+            if let Declaration::Class(c) = decl {
+                let mut raw_fields = Vec::new();
+                for inner in &c.declarations {
+                    if let Declaration::ModuleVariables(mv) = inner {
+                        for var in &mv.variables {
+                            let mut f_type = var
+                                .type_spec
+                                .as_ref()
+                                .map(|t| self.resolve_type_spec(t))
+                                .unwrap_or(VbType::Variant);
+                            if var.dimensions.is_some() {
+                                f_type = VbType::Array(Box::new(f_type));
+                            }
+                            raw_fields.push((var.name.clone(), f_type, mv.visibility == Visibility::Public));
+                        }
+                    }
+                }
+                let mut layout = crate::types::ClassLayout::compute(&c.name, &raw_fields, &self.udt_layouts, true);
+                for inner in &c.declarations {
+                    match inner {
+                        Declaration::Sub(s) => {
+                            if s.name.eq_ignore_ascii_case("Class_Initialize") {
+                                layout.has_initialize = true;
+                            } else if s.name.eq_ignore_ascii_case("Class_Terminate") {
+                                layout.has_terminate = true;
+                            }
+                            let params = self.validate_and_convert_parameters(&s.params, s.span);
+                            let param_types = params.into_iter().map(|p| p.vb_type).collect();
+                            layout.methods.insert(
+                                s.name.to_ascii_uppercase(),
+                                crate::types::ClassMethod {
+                                    name: s.name.clone(),
+                                    mangled_name: format!("{}__Function_{}", c.name, s.name),
+                                    is_sub: true,
+                                    is_public: s.visibility == Visibility::Public,
+                                    return_type: None,
+                                    param_types,
+                                },
+                            );
+                        }
+                        Declaration::Function(f) => {
+                            let ret_ty = f.return_type.as_ref().map(|t| self.resolve_type_spec(t)).unwrap_or(VbType::Variant);
+                            let params = self.validate_and_convert_parameters(&f.params, f.span);
+                            let param_types = params.into_iter().map(|p| p.vb_type).collect();
+                            layout.methods.insert(
+                                f.name.to_ascii_uppercase(),
+                                crate::types::ClassMethod {
+                                    name: f.name.clone(),
+                                    mangled_name: format!("{}__Function_{}", c.name, f.name),
+                                    is_sub: false,
+                                    is_public: f.visibility == Visibility::Public,
+                                    return_type: Some(ret_ty),
+                                    param_types,
+                                },
+                            );
+                        }
+                        Declaration::Property(p) => {
+                            let prop_type = p.return_type.as_ref().map(|t| self.resolve_type_spec(t)).unwrap_or(VbType::Variant);
+                            let entry = layout.properties.entry(p.name.to_ascii_uppercase()).or_insert_with(|| {
+                                crate::types::ClassProperty {
+                                    name: p.name.clone(),
+                                    has_get: false,
+                                    has_let: false,
+                                    has_set: false,
+                                    is_public: p.visibility == Visibility::Public,
+                                    prop_type: prop_type.clone(),
+                                }
+                            });
+                            match p.kind {
+                                PropertyKind::Get => entry.has_get = true,
+                                PropertyKind::Let => entry.has_let = true,
+                                PropertyKind::Set => entry.has_set = true,
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                self.class_layouts.insert(c.name.to_ascii_uppercase(), layout);
+            }
+        }
+
         // Preliminary pass: register all Type and Enum declarations first
         for decl in &file.declarations {
-            if matches!(decl, Declaration::Type(_) | Declaration::Enum(_)) {
+            if matches!(decl, Declaration::Type(_) | Declaration::Enum(_) | Declaration::Class(_)) {
                 self.declare_symbol(decl);
             }
         }
 
         // First pass: register procedure headers and module-level symbols
         for decl in &file.declarations {
-            if !matches!(decl, Declaration::Type(_) | Declaration::Enum(_)) {
+            if !matches!(decl, Declaration::Type(_) | Declaration::Enum(_) | Declaration::Class(_)) {
                 self.declare_symbol(decl);
             }
         }
@@ -343,6 +432,45 @@ impl SemanticAnalyzer {
                     let _ = self.symbol_table.define(member_sym);
                 }
             }
+            Declaration::Class(c) => {
+                let sym = Symbol {
+                    name: c.name.clone(),
+                    kind: SymbolKind::Class,
+                    vb_type: VbType::Class(c.name.clone()),
+                    visibility: c.visibility,
+                    span: c.span,
+                };
+                let _ = self.symbol_table.define(sym);
+            }
+            Declaration::Property(p) => {
+                let params = self.validate_and_convert_parameters(&p.params, p.span);
+                let ret_ty = p
+                    .return_type
+                    .as_ref()
+                    .map(|t| self.resolve_type_spec(t))
+                    .unwrap_or(VbType::Variant);
+                let proc_kind = match p.kind {
+                    PropertyKind::Get => ProcKind::PropertyGet,
+                    PropertyKind::Let => ProcKind::PropertyLet,
+                    PropertyKind::Set => ProcKind::PropertySet,
+                };
+                let sym = Symbol {
+                    name: p.name.clone(),
+                    kind: SymbolKind::Procedure {
+                        kind: proc_kind,
+                        params,
+                        return_type: if p.kind == PropertyKind::Get {
+                            Some(ret_ty.clone())
+                        } else {
+                            None
+                        },
+                    },
+                    vb_type: ret_ty,
+                    visibility: p.visibility,
+                    span: p.span,
+                };
+                let _ = self.symbol_table.define(sym);
+            }
             _ => {}
         }
     }
@@ -413,6 +541,100 @@ impl SemanticAnalyzer {
                     self.analyze_statement(stmt);
                 }
                 self.symbol_table.exit_scope();
+            }
+            Declaration::Property(p) => {
+                self.symbol_table.enter_scope(ScopeKind::Procedure);
+                for p_param in &p.params {
+                    let mut vb_type = p_param
+                        .param_type
+                        .as_ref()
+                        .map(|t| self.resolve_type_spec(t))
+                        .unwrap_or(VbType::Variant);
+                    if let Some(ref pt) = p_param.param_type {
+                        if !pt.array_dimensions.is_empty() {
+                            vb_type = VbType::Array(Box::new(vb_type));
+                        }
+                    }
+                    let sym = Symbol {
+                        name: p_param.name.clone(),
+                        kind: SymbolKind::Parameter {
+                            is_by_val: p_param.is_by_val,
+                            is_optional: p_param.is_optional,
+                            is_param_array: p_param.is_param_array,
+                        },
+                        vb_type,
+                        visibility: Visibility::Default,
+                        span: p.span,
+                    };
+                    let _ = self.symbol_table.define(sym);
+                }
+
+                for stmt in &p.body {
+                    self.analyze_statement(stmt);
+                }
+                self.symbol_table.exit_scope();
+            }
+            Declaration::Class(c) => {
+                let prev_class = self.current_class.replace(c.name.clone());
+                self.symbol_table.enter_scope(ScopeKind::Module);
+
+                // Define 'Me' in class scope
+                let me_sym = Symbol {
+                    name: "Me".to_string(),
+                    kind: SymbolKind::Variable {
+                        is_const: true,
+                        is_static: false,
+                    },
+                    vb_type: VbType::Class(c.name.clone()),
+                    visibility: Visibility::Public,
+                    span: c.span,
+                };
+                let _ = self.symbol_table.define(me_sym);
+
+                // Define fields in class scope
+                for inner in &c.declarations {
+                    if let Declaration::ModuleVariables(mv) = inner {
+                        for var in &mv.variables {
+                            let mut vb_type = var
+                                .type_spec
+                                .as_ref()
+                                .map(|t| self.resolve_type_spec(t))
+                                .unwrap_or(VbType::Variant);
+                            if var.dimensions.is_some() {
+                                vb_type = VbType::Array(Box::new(vb_type));
+                            }
+                            let var_sym = Symbol {
+                                name: var.name.clone(),
+                                kind: SymbolKind::Variable {
+                                    is_const: mv.is_const,
+                                    is_static: false,
+                                },
+                                vb_type,
+                                visibility: mv.visibility,
+                                span: mv.span,
+                            };
+                            let _ = self.symbol_table.define(var_sym);
+                        }
+                    }
+                }
+
+                // Declare methods & properties in class scope
+                for inner in &c.declarations {
+                    match inner {
+                        Declaration::Sub(_) | Declaration::Function(_) | Declaration::Property(_) => {
+                            self.declare_symbol(inner);
+                        }
+                        _ => {}
+                    }
+                }
+
+                // Analyze bodies of inner declarations
+                for inner in &c.declarations {
+                    self.analyze_declaration(inner);
+                }
+
+                self.symbol_table.exit_scope();
+                self.current_class = prev_class;
             }
             _ => {}
         }
@@ -1006,12 +1228,32 @@ impl SemanticAnalyzer {
                 }
             }
             Expression::Paren(inner) => self.infer_expression_type(inner),
+            Expression::New(cls_name) => VbType::Class(cls_name.clone()),
+            Expression::Me => {
+                if let Some(ref cls) = self.current_class {
+                    VbType::Class(cls.clone())
+                } else {
+                    VbType::Object
+                }
+            }
             Expression::MemberAccess { object, member } => {
                 let obj_ty = self.infer_expression_type(object);
                 if let VbType::UserDefined(ref udt_name) = obj_ty {
                     if let Some(layout) = self.udt_layouts.get(&udt_name.to_ascii_uppercase()) {
                         if let Some(mem) = layout.find_member(member) {
                             return mem.vb_type.clone();
+                        }
+                    }
+                } else if let VbType::Class(ref cls_name) = obj_ty {
+                    if let Some(layout) = self.class_layouts.get(&cls_name.to_ascii_uppercase()) {
+                        if let Some(f) = layout.find_field(member) {
+                            return f.vb_type.clone();
+                        }
+                        if let Some(p) = layout.find_property(member) {
+                            return p.prop_type.clone();
+                        }
+                        if let Some(m) = layout.find_method(member) {
+                            return m.return_type.clone().unwrap_or(VbType::Variant);
                         }
                     }
                 }
@@ -1023,6 +1265,18 @@ impl SemanticAnalyzer {
                         if let Some(layout) = self.udt_layouts.get(&udt_name.to_ascii_uppercase()) {
                             if let Some(mem) = layout.find_member(member) {
                                 return mem.vb_type.clone();
+                            }
+                        }
+                    } else if let VbType::Class(ref cls_name) = top_ty {
+                        if let Some(layout) = self.class_layouts.get(&cls_name.to_ascii_uppercase()) {
+                            if let Some(f) = layout.find_field(member) {
+                                return f.vb_type.clone();
+                            }
+                            if let Some(p) = layout.find_property(member) {
+                                return p.prop_type.clone();
+                            }
+                            if let Some(m) = layout.find_method(member) {
+                                return m.return_type.clone().unwrap_or(VbType::Variant);
                             }
                         }
                     }

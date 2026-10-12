@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <stdint.h>
 
 void vb6_init(void) {
     CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
@@ -937,6 +938,50 @@ char* vb6_fixed_str_get(const char* src, size_t fixed_len) {
     }
     res[fixed_len] = '\0';
     return res;
+}
+
+// -------------------------------------------------------------
+// VB6 Class / Object Runtime Subsystem
+// -------------------------------------------------------------
+
+typedef struct {
+    int64_t ref_count;
+    void (*terminate_fn)(void*);
+} Vb6ObjectHeader;
+
+void* vb6_object_create(size_t size, void (*terminate_fn)(void*)) {
+    size_t total = sizeof(Vb6ObjectHeader) + size;
+    Vb6ObjectHeader* header = (Vb6ObjectHeader*)malloc(total);
+    if (!header) return NULL;
+    header->ref_count = 1;
+    header->terminate_fn = terminate_fn;
+    void* obj_ptr = (void*)(header + 1);
+    memset(obj_ptr, 0, size);
+    return obj_ptr;
+}
+
+void vb6_object_addref(void* obj) {
+    if (!obj) return;
+    Vb6ObjectHeader* header = ((Vb6ObjectHeader*)obj) - 1;
+    header->ref_count++;
+}
+
+void vb6_object_release(void* obj) {
+    if (!obj) return;
+    Vb6ObjectHeader* header = ((Vb6ObjectHeader*)obj) - 1;
+    header->ref_count--;
+    if (header->ref_count <= 0) {
+        if (header->terminate_fn) {
+            header->terminate_fn(obj);
+        }
+        free(header);
+    }
+}
+
+int64_t vb6_object_get_refcount(void* obj) {
+    if (!obj) return 0;
+    Vb6ObjectHeader* header = ((Vb6ObjectHeader*)obj) - 1;
+    return header->ref_count;
 }
 
 
