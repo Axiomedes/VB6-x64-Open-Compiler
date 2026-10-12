@@ -903,4 +903,40 @@ void vb6_debug_print_variant(const Vb6Variant* v) {
     if (s) free(s);
 }
 
+// Memory and UDT helpers
+void vb6_memory_copy(void* dest, const void* src, size_t size) {
+    if (!dest || !src || size == 0) return;
+    memcpy(dest, src, size);
+}
+
+void vb6_memory_zero(void* dest, size_t size) {
+    if (!dest || size == 0) return;
+    memset(dest, 0, size);
+}
+
+void vb6_fixed_str_set(char* dest, size_t fixed_len, const char* src) {
+    if (!dest || fixed_len == 0) return;
+    size_t src_len = src ? strlen(src) : 0;
+    if (src_len >= fixed_len) {
+        memcpy(dest, src, fixed_len);
+    } else {
+        if (src_len > 0) {
+            memcpy(dest, src, src_len);
+        }
+        memset(dest + src_len, ' ', fixed_len - src_len);
+    }
+}
+
+char* vb6_fixed_str_get(const char* src, size_t fixed_len) {
+    char* res = (char*)malloc(fixed_len + 1);
+    if (!res) return NULL;
+    if (src && fixed_len > 0) {
+        memcpy(res, src, fixed_len);
+    } else {
+        memset(res, ' ', fixed_len);
+    }
+    res[fixed_len] = '\0';
+    return res;
+}
+
 

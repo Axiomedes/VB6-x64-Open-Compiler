@@ -16,6 +16,7 @@ pub struct IrModule {
     pub name: String,
     pub globals: Vec<IrGlobal>,
     pub functions: Vec<IrFunction>,
+    pub udt_layouts: std::collections::HashMap<String, crate::types::UdtLayout>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -242,5 +243,19 @@ pub enum IrInstruction {
         array: Operand,
         dim: Operand,
         is_ubound: bool,
+    },
+    /// UDT Member load: `%dest = GET_MEMBER %base, offset, member_type`
+    GetMember {
+        dest: usize,
+        base: Operand,
+        offset: usize,
+        member_type: VbType,
+    },
+    /// UDT Member store: `SET_MEMBER %base, offset, %value, member_type`
+    SetMember {
+        base: Operand,
+        offset: usize,
+        value: Operand,
+        member_type: VbType,
     },
 }

@@ -1,9 +1,9 @@
 //! LLVM IR text emitter from VB6 IR.
 //! Emits target-specific LLVM IR for Windows x64 (AMD64 / PE32+).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use vb6_compiler::ir::model::*;
-use vb6_compiler::types::VbType;
+use vb6_compiler::types::{UdtLayout, VbType};
 
 pub struct LlvmEmitter {
     target_triple: String,
@@ -143,6 +143,10 @@ impl LlvmEmitter {
             "vb6_variant_compare" => Some(("i32", &["ptr", "ptr"])),
             "vb6_variant_equal" => Some(("i16", &["ptr", "ptr"])),
             "vb6_debug_print_variant" => Some(("void", &["ptr"])),
+            "vb6_memory_copy" => Some(("void", &["ptr", "ptr", "i64"])),
+            "vb6_memory_zero" => Some(("void", &["ptr", "i64"])),
+            "vb6_fixed_str_set" => Some(("void", &["ptr", "i64", "ptr"])),
+            "vb6_fixed_str_get" => Some(("ptr", &["ptr", "i64"])),
             _ => None,
         }
     }
@@ -242,20 +246,30 @@ impl LlvmEmitter {
         out.push_str("declare void @vb6_variant_xor(ptr, ptr, ptr)\n");
         out.push_str("declare i32 @vb6_variant_compare(ptr, ptr)\n");
         out.push_str("declare i16 @vb6_variant_equal(ptr, ptr)\n");
-        out.push_str("declare void @vb6_debug_print_variant(ptr)\n\n");
+        out.push_str("declare void @vb6_debug_print_variant(ptr)\n");
+        out.push_str("declare void @vb6_memory_copy(ptr, ptr, i64)\n");
+        out.push_str("declare void @vb6_memory_zero(ptr, i64)\n");
+        out.push_str("declare void @vb6_fixed_str_set(ptr, i64, ptr)\n");
+        out.push_str("declare ptr @vb6_fixed_str_get(ptr, i64)\n\n");
 
         // Module-level global and static variables
         let mut global_types: HashMap<String, String> = HashMap::new();
         for glob in &module.globals {
-            let llvm_ty = Self::llvm_type(&glob.vb_type);
-            let def_val = Self::llvm_default_val(&glob.vb_type);
-            let align = glob.vb_type.alignment(true);
+            let (llvm_ty, def_val, align) = if let VbType::UserDefined(ref name) = glob.vb_type {
+                if let Some(layout) = module.udt_layouts.get(&name.to_ascii_uppercase()) {
+                    (format!("[{} x i8]", layout.total_size), "zeroinitializer".to_string(), layout.alignment.max(1))
+                } else {
+                    ("[8 x i8]".to_string(), "zeroinitializer".to_string(), 8)
+                }
+            } else {
+                (Self::llvm_type(&glob.vb_type).to_string(), Self::llvm_default_val(&glob.vb_type).to_string(), glob.vb_type.alignment(true).max(1))
+            };
             let linkage = if glob.is_public { "global" } else { "internal global" };
             out.push_str(&format!(
                 "@\"{}\" = {} {} {}, align {}\n",
                 glob.name, linkage, llvm_ty, def_val, align
             ));
-            global_types.insert(glob.name.to_ascii_uppercase(), llvm_ty.to_string());
+            global_types.insert(glob.name.to_ascii_uppercase(), llvm_ty);
         }
         if !module.globals.is_empty() {
             out.push('\n');
@@ -291,7 +305,7 @@ impl LlvmEmitter {
             if func.name.eq_ignore_ascii_case("Main") {
                 has_main_sub = true;
             }
-            out.push_str(&self.emit_function(func, &string_constants, &global_types));
+            out.push_str(&self.emit_function(func, &string_constants, &global_types, &module.udt_layouts));
             out.push('\n');
         }
 
@@ -352,6 +366,13 @@ impl LlvmEmitter {
                 check_op(right);
             }
             IrInstruction::Coerce { src, .. } => check_op(src),
+            IrInstruction::SetMember { value, .. } => check_op(value),
+            IrInstruction::ArraySetElement { value, indices, .. } => {
+                check_op(value);
+                for idx in indices {
+                    check_op(idx);
+                }
+            }
             _ => {}
         }
     }
@@ -361,6 +382,7 @@ impl LlvmEmitter {
         func: &IrFunction,
         string_constants: &HashMap<String, String>,
         global_types: &HashMap<String, String>,
+        udt_layouts: &HashMap<String, UdtLayout>,
     ) -> String {
         let mut out = String::new();
 
@@ -390,6 +412,13 @@ impl LlvmEmitter {
             params_str.join(", ")
         ));
 
+        let byref_params: HashSet<String> = func
+            .params
+            .iter()
+            .filter(|p| !p.is_by_val)
+            .map(|p| p.name.to_ascii_uppercase())
+            .collect();
+
         // Track local alloca types: name -> (llvm_type, align)
         let mut local_types: HashMap<String, (String, usize)> = HashMap::new();
         // Track temp types: temp_id -> llvm_type
@@ -399,13 +428,27 @@ impl LlvmEmitter {
         for block in &func.blocks {
             for inst in &block.instructions {
                 if let IrInstruction::AllocLocal { name, vb_type, .. } = inst {
-                    local_types.insert(
-                        name.to_ascii_uppercase(),
-                        (
-                            Self::llvm_type(vb_type).to_string(),
-                            vb_type.alignment(true).max(1),
-                        ),
-                    );
+                    let key = name.to_ascii_uppercase();
+                    if byref_params.contains(&key) {
+                        local_types.insert(key, ("ptr".to_string(), 8));
+                    } else if let VbType::UserDefined(ref udt_name) = vb_type {
+                        if let Some(layout) = udt_layouts.get(&udt_name.to_ascii_uppercase()) {
+                            local_types.insert(
+                                key,
+                                (format!("[{} x i8]", layout.total_size), layout.alignment.max(1)),
+                            );
+                        } else {
+                            local_types.insert(key, ("[8 x i8]".to_string(), 8));
+                        }
+                    } else {
+                        local_types.insert(
+                            key,
+                            (
+                                Self::llvm_type(vb_type).to_string(),
+                                vb_type.alignment(true).max(1),
+                            ),
+                        );
+                    }
                 }
             }
         }
@@ -422,38 +465,61 @@ impl LlvmEmitter {
                 for b in &func.blocks {
                     for inst in &b.instructions {
                         if let IrInstruction::AllocLocal { name, vb_type, .. } = inst {
-                            if emitted_allocas.insert(name.to_ascii_uppercase()) {
-                                let llvm_ty = Self::llvm_type(vb_type);
-                                let align = vb_type.alignment(true).max(1);
-                                out.push_str(&format!(
-                                    "  %\"local_{}\" = alloca {}, align {}\n",
-                                    name, llvm_ty, align
-                                ));
-                                let def_val = Self::llvm_default_val(vb_type);
-                                out.push_str(&format!(
-                                    "  store {} {}, ptr %\"local_{}\"\n",
-                                    llvm_ty, def_val, name
-                                ));
+                            let key = name.to_ascii_uppercase();
+                            if emitted_allocas.insert(key.clone()) {
+                                if byref_params.contains(&key) {
+                                    out.push_str(&format!(
+                                        "  %\"local_{}\" = alloca ptr, align 8\n",
+                                        name
+                                    ));
+                                    out.push_str(&format!(
+                                        "  store ptr null, ptr %\"local_{}\"\n",
+                                        name
+                                    ));
+                                } else if let VbType::UserDefined(ref udt_name) = vb_type {
+                                    let (total_sz, align) = udt_layouts
+                                        .get(&udt_name.to_ascii_uppercase())
+                                        .map(|l| (l.total_size, l.alignment.max(1)))
+                                        .unwrap_or((8, 8));
+                                    out.push_str(&format!(
+                                        "  %\"local_{}\" = alloca [{} x i8], align {}\n",
+                                        name, total_sz, align
+                                    ));
+                                    out.push_str(&format!(
+                                        "  store [{} x i8] zeroinitializer, ptr %\"local_{}\"\n",
+                                        total_sz, name
+                                    ));
+                                } else {
+                                    let llvm_ty = Self::llvm_type(vb_type);
+                                    let align = vb_type.alignment(true).max(1);
+                                    out.push_str(&format!(
+                                        "  %\"local_{}\" = alloca {}, align {}\n",
+                                        name, llvm_ty, align
+                                    ));
+                                    let def_val = Self::llvm_default_val(vb_type);
+                                    out.push_str(&format!(
+                                        "  store {} {}, ptr %\"local_{}\"\n",
+                                        llvm_ty, def_val, name
+                                    ));
+                                }
                             }
                         }
                     }
                 }
 
                 for p in &func.params {
-                    let key = p.name.to_ascii_uppercase();
-                    if let Some((llvm_ty, _)) = local_types.get(&key) {
-                        if p.is_by_val {
-                            out.push_str(&format!(
-                                "  store {} %\"arg_{}\", ptr %\"local_{}\"\n",
-                                llvm_ty, p.name, p.name
-                            ));
-                        } else {
-                            // ByRef is passed as pointer
-                            out.push_str(&format!(
-                                "  store ptr %\"arg_{}\", ptr %\"local_{}\"\n",
-                                p.name, p.name
-                            ));
-                        }
+                    if p.is_by_val {
+                        let llvm_ty = Self::llvm_type(&p.vb_type);
+                        out.push_str(&format!(
+                            "  store {} %\"arg_{}\", ptr %\"local_{}\"\n",
+                            llvm_ty, p.name, p.name
+                        ));
+                    } else {
+                        // ByRef is passed as pointer
+                        out.push_str(&format!(
+                            "  store ptr %\"arg_{}\", ptr %\"local_{}\"\n",
+                            p.name, p.name
+                        ));
                     }
                 }
             }
@@ -467,6 +533,8 @@ impl LlvmEmitter {
                     &mut temp_types,
                     string_constants,
                     &func.return_type,
+                    &byref_params,
+                    udt_layouts,
                     &mut branch_counter,
                 );
                 if matches!(
@@ -499,6 +567,34 @@ impl LlvmEmitter {
         out
     }
 
+    fn format_base_ptr(
+        &self,
+        base: &Operand,
+        byref_params: &HashSet<String>,
+        out: &mut String,
+        branch_counter: &mut usize,
+    ) -> String {
+        match base {
+            Operand::Local(name) => {
+                if byref_params.contains(&name.to_ascii_uppercase()) {
+                    *branch_counter += 1;
+                    let ptr_temp = format!("%base_ptr_{}", branch_counter);
+                    out.push_str(&format!("  {} = load ptr, ptr %\"local_{}\"\n", ptr_temp, name));
+                    ptr_temp
+                } else {
+                    format!("%\"local_{}\"", name)
+                }
+            }
+            Operand::Global(name) => {
+                format!("@\"{}\"", name)
+            }
+            Operand::Temp(id) => {
+                format!("%t{}", id)
+            }
+            _ => "null".to_string(),
+        }
+    }
+
     fn emit_instruction(
         &self,
         inst: &IrInstruction,
@@ -508,6 +604,8 @@ impl LlvmEmitter {
         temp_types: &mut HashMap<usize, String>,
         string_constants: &HashMap<String, String>,
         func_ret_type: &Option<VbType>,
+        byref_params: &HashSet<String>,
+        udt_layouts: &HashMap<String, UdtLayout>,
         branch_counter: &mut usize,
     ) {
         match inst {
@@ -544,6 +642,34 @@ impl LlvmEmitter {
                 }
             }
             IrInstruction::Store { dest, src } => {
+                let dest_udt = match dest {
+                    Operand::Local(ref name) => local_types.get(&name.to_ascii_uppercase()).and_then(|(t, _)| {
+                        if t.starts_with('[') && t.ends_with(" x i8]") && t != "[24 x i8]" {
+                            Some(t.clone())
+                        } else {
+                            None
+                        }
+                    }),
+                    Operand::Global(ref name) => global_types.get(&name.to_ascii_uppercase()).and_then(|t| {
+                        if t.starts_with('[') && t.ends_with(" x i8]") && t != "[24 x i8]" {
+                            Some(t.clone())
+                        } else {
+                            None
+                        }
+                    }),
+                    _ => None,
+                };
+                if let Some(ref arr_ty) = dest_udt {
+                    let sz: usize = arr_ty.trim_start_matches('[').trim_end_matches(" x i8]").parse().unwrap_or(8);
+                    let dest_ptr = self.format_base_ptr(dest, byref_params, out, branch_counter);
+                    let src_ptr = self.format_base_ptr(src, byref_params, out, branch_counter);
+                    out.push_str(&format!(
+                        "  call void @vb6_memory_copy(ptr {}, ptr {}, i64 {})\n",
+                        dest_ptr, src_ptr, sz
+                    ));
+                    return;
+                }
+
                 let dest_is_variant = match dest {
                     Operand::Local(ref name) => local_types.get(&name.to_ascii_uppercase()).map(|(t, _)| t == "[24 x i8]").unwrap_or(false),
                     Operand::Global(ref name) => global_types.get(&name.to_ascii_uppercase()).map(|t| t == "[24 x i8]").unwrap_or(false),
@@ -856,6 +982,11 @@ impl LlvmEmitter {
                 let mut args_formatted: Vec<String> = Vec::new();
                 for (i, arg) in args.iter().enumerate() {
                     let (arg_val, arg_ty) = self.format_operand(arg, local_types, global_types, temp_types, string_constants);
+                    if arg_ty.starts_with('[') && arg_ty.ends_with(" x i8]") && arg_ty != "[24 x i8]" {
+                        let ptr_val = self.format_base_ptr(arg, byref_params, out, branch_counter);
+                        args_formatted.push(format!("ptr {}", ptr_val));
+                        continue;
+                    }
                     if let Some((_, param_types)) = sig_opt {
                         if let Some(&expected_ty) = param_types.get(i) {
                             let (cast_val, final_ty) = cast_arg(&arg_val, &arg_ty, expected_ty, out, branch_counter);
@@ -1064,7 +1195,7 @@ impl LlvmEmitter {
                         out.push_str(&format!("  %t{} = fptosi double %val_dbl_{} to {}\n", dest, c_id, to_llvm_ty));
                     } else if to_type == &VbType::Boolean {
                         out.push_str(&format!("  %t{} = fptosi double %val_dbl_{} to i16\n", dest, c_id));
-                    } else {
+                    } else if to_llvm_ty != "ptr" {
                         out.push_str(&format!("  %t{} = fptosi double %val_dbl_{} to {}\n", dest, c_id, to_llvm_ty));
                     }
                 } else if to_type == &VbType::Boolean {
@@ -1233,7 +1364,7 @@ impl LlvmEmitter {
                     "  %arr_bounds_decay_{} = getelementptr inbounds [{} x i32], ptr %arr_bounds_{}, i32 0, i32 0\n",
                     dest, bounds_count, dest
                 ));
-                let elem_sz = elem_size_bytes(elem_type);
+                let elem_sz = elem_size_bytes(elem_type, udt_layouts);
                 out.push_str(&format!(
                     "  %t{} = call ptr @vb6_array_create(i32 {}, ptr %arr_bounds_decay_{}, i32 {})\n",
                     dest, dims, dest, elem_sz
@@ -1318,12 +1449,20 @@ impl LlvmEmitter {
                     "  %arr_elem_ptr_{} = call ptr @vb6_array_element_ptr(ptr {}, i32 {}, ptr %arr_get_decay_{})\n",
                     dest, arr_val, dims, dest
                 ));
-                let llvm_ty = Self::llvm_type(elem_type);
-                out.push_str(&format!(
-                    "  %t{} = load {}, ptr %arr_elem_ptr_{}\n",
-                    dest, llvm_ty, dest
-                ));
-                temp_types.insert(*dest, llvm_ty.to_string());
+                if matches!(elem_type, VbType::UserDefined(_)) {
+                    out.push_str(&format!(
+                        "  %t{} = bitcast ptr %arr_elem_ptr_{} to ptr\n",
+                        dest, dest
+                    ));
+                    temp_types.insert(*dest, "ptr".to_string());
+                } else {
+                    let llvm_ty = Self::llvm_type(elem_type);
+                    out.push_str(&format!(
+                        "  %t{} = load {}, ptr %arr_elem_ptr_{}\n",
+                        dest, llvm_ty, dest
+                    ));
+                    temp_types.insert(*dest, llvm_ty.to_string());
+                }
             }
             IrInstruction::ArraySetElement {
                 array,
@@ -1365,26 +1504,35 @@ impl LlvmEmitter {
                     "  %arr_set_elem_ptr_{} = call ptr @vb6_array_element_ptr(ptr {}, i32 {}, ptr %arr_set_decay_{})\n",
                     set_id, arr_val, dims, set_id
                 ));
-                let (val_str, val_ty) = self.format_operand(value, local_types, global_types, temp_types, string_constants);
-                let elem_llvm_ty = Self::llvm_type(elem_type);
-                let final_val = if val_ty != elem_llvm_ty {
-                    let cast_val = format!("%arr_set_val_cast_{}", set_id);
-                    if val_ty == "i32" && elem_llvm_ty == "i64" {
-                        out.push_str(&format!("  {} = sext i32 {} to i64\n", cast_val, val_str));
-                        cast_val
-                    } else if val_ty == "i16" && elem_llvm_ty == "i32" {
-                        out.push_str(&format!("  {} = sext i16 {} to i32\n", cast_val, val_str));
-                        cast_val
+                if let VbType::UserDefined(ref udt_name) = elem_type {
+                    let total_sz = udt_layouts.get(&udt_name.to_ascii_uppercase()).map(|l| l.total_size).unwrap_or(8);
+                    let src_ptr = self.format_base_ptr(value, byref_params, out, branch_counter);
+                    out.push_str(&format!(
+                        "  call void @vb6_memory_copy(ptr %arr_set_elem_ptr_{}, ptr {}, i64 {})\n",
+                        set_id, src_ptr, total_sz
+                    ));
+                } else {
+                    let (val_str, val_ty) = self.format_operand(value, local_types, global_types, temp_types, string_constants);
+                    let elem_llvm_ty = Self::llvm_type(elem_type);
+                    let final_val = if val_ty != elem_llvm_ty {
+                        let cast_val = format!("%arr_set_val_cast_{}", set_id);
+                        if val_ty == "i32" && elem_llvm_ty == "i64" {
+                            out.push_str(&format!("  {} = sext i32 {} to i64\n", cast_val, val_str));
+                            cast_val
+                        } else if val_ty == "i16" && elem_llvm_ty == "i32" {
+                            out.push_str(&format!("  {} = sext i16 {} to i32\n", cast_val, val_str));
+                            cast_val
+                        } else {
+                            val_str
+                        }
                     } else {
                         val_str
-                    }
-                } else {
-                    val_str
-                };
-                out.push_str(&format!(
-                    "  store {} {}, ptr %arr_set_elem_ptr_{}\n",
-                    elem_llvm_ty, final_val, set_id
-                ));
+                    };
+                    out.push_str(&format!(
+                        "  store {} {}, ptr %arr_set_elem_ptr_{}\n",
+                        elem_llvm_ty, final_val, set_id
+                    ));
+                }
             }
             IrInstruction::ArrayReDim {
                 dest,
@@ -1443,7 +1591,7 @@ impl LlvmEmitter {
                     "  %arr_redim_decay_{} = getelementptr inbounds [{} x i32], ptr %arr_redim_bounds_{}, i32 0, i32 0\n",
                     dest, bounds_count, dest
                 ));
-                let elem_sz = elem_size_bytes(elem_type);
+                let elem_sz = elem_size_bytes(elem_type, udt_layouts);
                 let pres_int = if *preserve { 1 } else { 0 };
                 out.push_str(&format!(
                     "  %t{} = call ptr @vb6_array_redim(ptr {}, i32 {}, ptr %arr_redim_decay_{}, i32 {}, i32 {})\n",
@@ -1472,6 +1620,112 @@ impl LlvmEmitter {
                     dest, func_name, arr_val, dim_i32
                 ));
                 temp_types.insert(*dest, "i32".to_string());
+            }
+            IrInstruction::GetMember {
+                dest,
+                base,
+                offset,
+                member_type,
+            } => {
+                let base_ptr = self.format_base_ptr(base, byref_params, out, branch_counter);
+                *branch_counter += 1;
+                let member_ptr = format!("%mem_ptr_{}", branch_counter);
+                out.push_str(&format!(
+                    "  {} = getelementptr i8, ptr {}, i64 {}\n",
+                    member_ptr, base_ptr, offset
+                ));
+                match member_type {
+                    VbType::UserDefined(_) => {
+                        out.push_str(&format!("  %t{} = bitcast ptr {} to ptr\n", dest, member_ptr));
+                        temp_types.insert(*dest, "ptr".to_string());
+                    }
+                    VbType::FixedString(len) => {
+                        out.push_str(&format!(
+                            "  %t{} = call ptr @vb6_fixed_str_get(ptr {}, i64 {})\n",
+                            dest, member_ptr, len
+                        ));
+                        temp_types.insert(*dest, "ptr".to_string());
+                    }
+                    VbType::Variant => {
+                        out.push_str(&format!(
+                            "  %t{} = load [24 x i8], ptr {}\n",
+                            dest, member_ptr
+                        ));
+                        temp_types.insert(*dest, "[24 x i8]".to_string());
+                    }
+                    _ => {
+                        let llvm_ty = Self::llvm_type(member_type);
+                        out.push_str(&format!(
+                            "  %t{} = load {}, ptr {}\n",
+                            dest, llvm_ty, member_ptr
+                        ));
+                        temp_types.insert(*dest, llvm_ty.to_string());
+                    }
+                }
+            }
+            IrInstruction::SetMember {
+                base,
+                offset,
+                value,
+                member_type,
+            } => {
+                let base_ptr = self.format_base_ptr(base, byref_params, out, branch_counter);
+                *branch_counter += 1;
+                let member_ptr = format!("%mem_ptr_{}", branch_counter);
+                out.push_str(&format!(
+                    "  {} = getelementptr i8, ptr {}, i64 {}\n",
+                    member_ptr, base_ptr, offset
+                ));
+                let (val_str, val_ty) = self.format_operand(value, local_types, global_types, temp_types, string_constants);
+                match member_type {
+                    VbType::UserDefined(udt_name) => {
+                        let total_sz = udt_layouts.get(&udt_name.to_ascii_uppercase()).map(|l| l.total_size).unwrap_or(8);
+                        let src_ptr = self.format_base_ptr(value, byref_params, out, branch_counter);
+                        out.push_str(&format!(
+                            "  call void @vb6_memory_copy(ptr {}, ptr {}, i64 {})\n",
+                            member_ptr, src_ptr, total_sz
+                        ));
+                    }
+                    VbType::FixedString(len) => {
+                        out.push_str(&format!(
+                            "  call void @vb6_fixed_str_set(ptr {}, i64 {}, ptr {})\n",
+                            member_ptr, len, val_str
+                        ));
+                    }
+                    VbType::Variant => {
+                        if val_ty == "[24 x i8]" {
+                            *branch_counter += 1;
+                            let c_id = *branch_counter;
+                            out.push_str(&format!("  %var_src_{} = alloca [24 x i8], align 8\n", c_id));
+                            out.push_str(&format!("  store [24 x i8] {}, ptr %var_src_{}\n", val_str, c_id));
+                            out.push_str(&format!("  call void @vb6_variant_copy(ptr {}, ptr %var_src_{})\n", member_ptr, c_id));
+                        } else {
+                            out.push_str(&format!("  store {} {}, ptr {}\n", val_ty, val_str, member_ptr));
+                        }
+                    }
+                    _ => {
+                        let target_llvm_ty = Self::llvm_type(member_type);
+                        let final_val = if val_ty != target_llvm_ty {
+                            *branch_counter += 1;
+                            let cast_v = format!("%set_mem_cast_{}", branch_counter);
+                            if val_ty == "i32" && target_llvm_ty == "i64" {
+                                out.push_str(&format!("  {} = sext i32 {} to i64\n", cast_v, val_str));
+                                cast_v
+                            } else if val_ty == "i16" && target_llvm_ty == "i32" {
+                                out.push_str(&format!("  {} = sext i16 {} to i32\n", cast_v, val_str));
+                                cast_v
+                            } else {
+                                val_str
+                            }
+                        } else {
+                            val_str
+                        };
+                        out.push_str(&format!(
+                            "  store {} {}, ptr {}\n",
+                            target_llvm_ty, final_val, member_ptr
+                        ));
+                    }
+                }
             }
             _ => {}
         }
@@ -1561,13 +1815,17 @@ fn escape_llvm_string(s: &str) -> (String, usize) {
     (out, len)
 }
 
-fn elem_size_bytes(vb_type: &VbType) -> usize {
+fn elem_size_bytes(vb_type: &VbType, udt_layouts: &HashMap<String, UdtLayout>) -> usize {
     match vb_type {
         VbType::Byte => 1,
         VbType::Integer | VbType::Boolean => 2,
         VbType::Long | VbType::Enum(_) | VbType::Single => 4,
         VbType::LongPtr | VbType::LongLong | VbType::Currency | VbType::Double | VbType::Date => 8,
-        VbType::String | VbType::Object | VbType::Array(_) | VbType::UserDefined(_) => 8,
+        VbType::String | VbType::Object | VbType::Array(_) => 8,
+        VbType::UserDefined(name) => {
+            udt_layouts.get(&name.to_ascii_uppercase()).map(|l| l.total_size).unwrap_or(8)
+        }
+        VbType::FixedString(len) => *len,
         VbType::Variant => 24,
         _ => 8,
     }

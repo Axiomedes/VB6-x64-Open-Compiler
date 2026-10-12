@@ -227,6 +227,18 @@ impl IrPrinter {
                     dest, name, Self::print_operand(array), Self::print_operand(dim)
                 )
             }
+            IrInstruction::GetMember { dest, base, offset, member_type } => {
+                format!(
+                    "%{} = GET_MEMBER {}, offset={}, type={:?}",
+                    dest, Self::print_operand(base), offset, member_type
+                )
+            }
+            IrInstruction::SetMember { base, offset, value, member_type } => {
+                format!(
+                    "SET_MEMBER {}, offset={}, val={}, type={:?}",
+                    Self::print_operand(base), offset, Self::print_operand(value), member_type
+                )
+            }
         }
     }
 

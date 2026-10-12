@@ -27,13 +27,32 @@ impl UdtLayout {
         raw_members: &[(String, VbType)],
         is_64bit: bool,
     ) -> Self {
+        Self::compute_with_layouts(name, raw_members, &std::collections::HashMap::new(), is_64bit)
+    }
+
+    /// Calculate the memory layout taking existing nested UDT layouts into account.
+    pub fn compute_with_layouts(
+        name: &str,
+        raw_members: &[(String, VbType)],
+        existing_layouts: &std::collections::HashMap<String, UdtLayout>,
+        is_64bit: bool,
+    ) -> Self {
         let mut members = Vec::new();
         let mut current_offset = 0usize;
         let mut max_alignment = 1usize;
 
         for (mem_name, mem_type) in raw_members {
-            let size = mem_type.size_in_bytes(is_64bit);
-            let align = mem_type.alignment(is_64bit).max(1);
+            let (size, align) = match mem_type {
+                VbType::UserDefined(nested_name) => {
+                    if let Some(nested) = existing_layouts.get(&nested_name.to_ascii_uppercase()) {
+                        (nested.total_size, nested.alignment)
+                    } else {
+                        (mem_type.size_in_bytes(is_64bit), mem_type.alignment(is_64bit).max(1))
+                    }
+                }
+                _ => (mem_type.size_in_bytes(is_64bit), mem_type.alignment(is_64bit).max(1)),
+            };
+
             if align > max_alignment {
                 max_alignment = align;
             }

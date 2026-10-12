@@ -116,6 +116,16 @@ impl Parser {
             TokenKind::Sub | TokenKind::Function | TokenKind::Property => {
                 self.parse_declaration_with_visibility(Visibility::Default)
             }
+            TokenKind::Type => {
+                self.advance();
+                let udt = self.parse_type_declaration(Visibility::Default, token.span)?;
+                Ok(Some(Declaration::Type(udt)))
+            }
+            TokenKind::Enum => {
+                self.advance();
+                let enum_decl = self.parse_enum_declaration(Visibility::Default, token.span)?;
+                Ok(Some(Declaration::Enum(enum_decl)))
+            }
             TokenKind::Dim | TokenKind::Const | TokenKind::Static => {
                 let decl = self.parse_module_variables(Visibility::Private)?;
                 Ok(Some(Declaration::ModuleVariables(decl)))
@@ -152,6 +162,16 @@ impl Parser {
                 self.advance();
                 let prop = self.parse_prop_declaration(vis, next_token.span)?;
                 Ok(Some(Declaration::Property(prop)))
+            }
+            TokenKind::Type => {
+                self.advance();
+                let udt = self.parse_type_declaration(vis, next_token.span)?;
+                Ok(Some(Declaration::Type(udt)))
+            }
+            TokenKind::Enum => {
+                self.advance();
+                let enum_decl = self.parse_enum_declaration(vis, next_token.span)?;
+                Ok(Some(Declaration::Enum(enum_decl)))
             }
             TokenKind::Dim | TokenKind::Const => {
                 let vars = self.parse_module_variables(vis)?;
@@ -311,6 +331,190 @@ impl Parser {
         })
     }
 
+    fn parse_type_declaration(
+        &mut self,
+        visibility: Visibility,
+        start_span: Span,
+    ) -> Result<TypeDeclaration, ParserError> {
+        let name = self.expect_identifier("Type name")?;
+        self.expect_statement_terminator("Type header")?;
+
+        let mut members = Vec::new();
+        let end_span;
+
+        loop {
+            self.skip_newlines_and_colons();
+            if self.is_at_end() {
+                return Err(ParserError::UnexpectedToken(
+                    TokenKind::Eof,
+                    self.peek().span.start_line,
+                    self.peek().span.start_col,
+                    "End Type",
+                ));
+            }
+
+            if self.check(&TokenKind::End) {
+                let end_token = self.advance().clone();
+                if self.check(&TokenKind::Type) {
+                    let type_token = self.advance().clone();
+                    end_span = Span::new(
+                        end_token.span.start_line,
+                        end_token.span.start_col,
+                        type_token.span.end_line,
+                        type_token.span.end_col,
+                    );
+                    self.expect_statement_terminator("End Type")?;
+                    break;
+                } else {
+                    return Err(ParserError::UnexpectedToken(
+                        self.peek().kind.clone(),
+                        self.peek().span.start_line,
+                        self.peek().span.start_col,
+                        "'Type' following 'End'",
+                    ));
+                }
+            }
+
+            let mem_name = self.expect_identifier("Type member name")?;
+            let mut array_dims = Vec::new();
+            if self.match_token(&TokenKind::LParen) {
+                if !self.check(&TokenKind::RParen) {
+                    loop {
+                        let first_expr = self.parse_expression()?;
+                        let (lower, upper) = if self.match_token(&TokenKind::To) {
+                            let second_expr = self.parse_expression()?;
+                            (Some(first_expr), second_expr)
+                        } else {
+                            (None, first_expr)
+                        };
+                        let low_val = match lower {
+                            Some(crate::ast::expr::Expression::Literal(crate::ast::expr::Literal::Integer(v))) => Some(v),
+                            _ => None,
+                        };
+                        let up_val = match upper {
+                            crate::ast::expr::Expression::Literal(crate::ast::expr::Literal::Integer(v)) => v,
+                            _ => 0,
+                        };
+                        array_dims.push(crate::ast::types::ArrayDimension { lower: low_val, upper: up_val });
+                        if !self.match_token(&TokenKind::Comma) {
+                            break;
+                        }
+                    }
+                }
+                self.expect(&TokenKind::RParen, "')' closing member array bounds")?;
+            }
+
+            self.expect(&TokenKind::As, "'As' in Type member declaration")?;
+            let mut type_spec = self.parse_type_spec()?;
+            if !array_dims.is_empty() {
+                type_spec.array_dimensions = array_dims;
+            }
+            self.expect_statement_terminator("Type member declaration")?;
+
+            members.push(TypeMember {
+                name: mem_name,
+                type_spec,
+            });
+        }
+
+        Ok(TypeDeclaration {
+            visibility,
+            name,
+            members,
+            span: Span::new(
+                start_span.start_line,
+                start_span.start_col,
+                end_span.end_line,
+                end_span.end_col,
+            ),
+        })
+    }
+
+    fn parse_enum_declaration(
+        &mut self,
+        visibility: Visibility,
+        start_span: Span,
+    ) -> Result<EnumDeclaration, ParserError> {
+        let name = self.expect_identifier("Enum name")?;
+        self.expect_statement_terminator("Enum header")?;
+
+        let mut members = Vec::new();
+        let end_span;
+
+        loop {
+            self.skip_newlines_and_colons();
+            if self.is_at_end() {
+                return Err(ParserError::UnexpectedToken(
+                    TokenKind::Eof,
+                    self.peek().span.start_line,
+                    self.peek().span.start_col,
+                    "End Enum",
+                ));
+            }
+
+            if self.check(&TokenKind::End) {
+                let end_token = self.advance().clone();
+                if self.check(&TokenKind::Enum) {
+                    let enum_token = self.advance().clone();
+                    end_span = Span::new(
+                        end_token.span.start_line,
+                        end_token.span.start_col,
+                        enum_token.span.end_line,
+                        enum_token.span.end_col,
+                    );
+                    self.expect_statement_terminator("End Enum")?;
+                    break;
+                } else {
+                    return Err(ParserError::UnexpectedToken(
+                        self.peek().kind.clone(),
+                        self.peek().span.start_line,
+                        self.peek().span.start_col,
+                        "'Enum' following 'End'",
+                    ));
+                }
+            }
+
+            let mem_name = self.expect_identifier("Enum member name")?;
+            let value = if self.match_token(&TokenKind::Equals) {
+                let expr = self.parse_expression()?;
+                match expr {
+                    crate::ast::expr::Expression::Literal(crate::ast::expr::Literal::Integer(val)) => Some(val),
+                    crate::ast::expr::Expression::UnaryOp {
+                        op: crate::ast::expr::UnaryOperator::Negate,
+                        operand,
+                    } => {
+                        if let crate::ast::expr::Expression::Literal(crate::ast::expr::Literal::Integer(val)) = *operand {
+                            Some(-val)
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            self.expect_statement_terminator("Enum member declaration")?;
+
+            members.push(crate::ast::decl::EnumMember {
+                name: mem_name,
+                value,
+            });
+        }
+
+        Ok(EnumDeclaration {
+            visibility,
+            name,
+            members,
+            span: Span::new(
+                start_span.start_line,
+                start_span.start_col,
+                end_span.end_line,
+                end_span.end_col,
+            ),
+        })
+    }
+
     fn parse_block_until(
         &mut self,
         expected_end_kind: TokenKind,
@@ -410,10 +614,18 @@ impl Parser {
     fn parse_type_spec(&mut self) -> Result<TypeSpec, ParserError> {
         let is_new = self.match_token(&TokenKind::New);
         let name = self.expect_identifier("type name")?;
+        let mut fixed_length = None;
+        if self.match_token(&TokenKind::Asterisk) {
+            let len_token = self.peek().clone();
+            if let TokenKind::IntegerLiteral(n) = len_token.kind {
+                self.advance();
+                fixed_length = Some(n as usize);
+            }
+        }
         Ok(TypeSpec {
             name,
             is_new,
-            fixed_length: None,
+            fixed_length,
             array_dimensions: Vec::new(),
         })
     }
@@ -525,6 +737,27 @@ impl Parser {
                     is_set,
                     span: token.span,
                 })
+            }
+            TokenKind::Dot => {
+                let target_expr = self.parse_postfix()?;
+                if self.match_token(&TokenKind::Equals) {
+                    let value = self.parse_expression()?;
+                    self.expect_statement_terminator("Assignment statement")?;
+                    Ok(Statement::Assignment {
+                        target: target_expr,
+                        value,
+                        is_set: false,
+                        span: token.span,
+                    })
+                } else {
+                    self.expect_statement_terminator("statement")?;
+                    Ok(Statement::Assignment {
+                        target: target_expr.clone(),
+                        value: target_expr,
+                        is_set: false,
+                        span: token.span,
+                    })
+                }
             }
             TokenKind::Identifier(id) => {
                 // Check if this is a line label: `Label:`

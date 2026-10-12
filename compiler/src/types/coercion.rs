@@ -41,6 +41,20 @@ pub fn check_coercion(from: &VbType, target: &VbType) -> CoercionKind {
         return CoercionKind::Narrowing;
     }
 
+    // Case-insensitive match for UserDefined
+    if let (VbType::UserDefined(u1), VbType::UserDefined(u2)) = (from, target) {
+        if u1.eq_ignore_ascii_case(u2) {
+            return CoercionKind::Exact;
+        }
+    }
+
+    // Case-insensitive match for Enum
+    if let (VbType::Enum(e1), VbType::Enum(e2)) = (from, target) {
+        if e1.eq_ignore_ascii_case(e2) {
+            return CoercionKind::Exact;
+        }
+    }
+
     // String <-> FixedString
     if matches!((from, target), (VbType::String, VbType::FixedString(_)) | (VbType::FixedString(_), VbType::String)) {
         return CoercionKind::Exact;
@@ -71,7 +85,7 @@ fn numeric_rank(ty: &VbType) -> u8 {
     match ty {
         VbType::Byte => 1,
         VbType::Integer => 2,
-        VbType::Long => 3,
+        VbType::Long | VbType::Enum(_) => 3,
         VbType::LongPtr => 4,
         VbType::LongLong => 5,
         VbType::Single => 6,

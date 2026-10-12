@@ -27,6 +27,12 @@ pub fn default_constant_for_type(ty: &VbType) -> IrConstant {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct WithContext {
+    pub base_operand: Operand,
+    pub vb_type: VbType,
+}
+
 pub struct AstToIrLowering {
     temp_counter: usize,
     block_counter: usize,
@@ -41,6 +47,10 @@ pub struct AstToIrLowering {
     temp_types: HashMap<usize, VbType>,
     for_exit_stack: Vec<String>,
     do_exit_stack: Vec<String>,
+    pub udt_layouts: HashMap<String, crate::types::UdtLayout>,
+    pub enum_defs: HashMap<String, crate::types::EnumDefinition>,
+    pub enum_constants: HashMap<String, (i32, VbType)>,
+    pub with_stack: Vec<WithContext>,
 }
 
 impl Default for AstToIrLowering {
@@ -65,6 +75,27 @@ impl AstToIrLowering {
             temp_types: HashMap::new(),
             for_exit_stack: Vec::new(),
             do_exit_stack: Vec::new(),
+            udt_layouts: HashMap::new(),
+            enum_defs: HashMap::new(),
+            enum_constants: HashMap::new(),
+            with_stack: Vec::new(),
+        }
+    }
+
+    pub fn resolve_type_spec(&self, ts: &crate::ast::types::TypeSpec) -> VbType {
+        let key = ts.name.to_ascii_uppercase();
+        if self.enum_defs.contains_key(&key) {
+            VbType::Enum(ts.name.clone())
+        } else if self.udt_layouts.contains_key(&key) {
+            VbType::UserDefined(ts.name.clone())
+        } else if let Some(len) = ts.fixed_length {
+            if ts.name.eq_ignore_ascii_case("String") {
+                VbType::FixedString(len)
+            } else {
+                VbType::from_name(&ts.name)
+            }
+        } else {
+            VbType::from_name(&ts.name)
         }
     }
 
@@ -76,6 +107,8 @@ impl AstToIrLowering {
             (Operand::Global(static_name.clone()), ty.clone())
         } else if let Some((global_name, ty)) = self.module_globals.get(&key) {
             (Operand::Global(global_name.clone()), ty.clone())
+        } else if let Some((val, ty)) = self.enum_constants.get(&key) {
+            (Operand::Constant(IrConstant::Int(*val as i64, ty.clone())), ty.clone())
         } else {
             (Operand::Local(name.to_string()), VbType::Variant)
         }
@@ -141,6 +174,72 @@ impl AstToIrLowering {
         }
     }
 
+    pub fn resolve_member_access(
+        &mut self,
+        object: &Expression,
+        member: &str,
+    ) -> Option<(Operand, usize, VbType)> {
+        let (base_op, base_ty) = match object {
+            Expression::Variable(name) => self.resolve_variable(name),
+            Expression::WithMemberAccess(inner_member) => {
+                let ctx = self.with_stack.last().cloned()?;
+                let struct_name = match &ctx.vb_type {
+                    VbType::UserDefined(s) => s.clone(),
+                    _ => return None,
+                };
+                let layout = self
+                    .udt_layouts
+                    .get(&struct_name.to_ascii_uppercase())?
+                    .clone();
+                let m = layout
+                    .members
+                    .iter()
+                    .find(|m| m.name.eq_ignore_ascii_case(inner_member))?
+                    .clone();
+                let dest = self.next_temp();
+                self.temp_types.insert(dest, m.vb_type.clone());
+                self.emit(IrInstruction::GetMember {
+                    dest,
+                    base: ctx.base_operand,
+                    offset: m.offset,
+                    member_type: m.vb_type.clone(),
+                });
+                (Operand::Temp(dest), m.vb_type)
+            }
+            Expression::MemberAccess {
+                object: inner_obj,
+                member: inner_member,
+            } => {
+                let (b_op, offset, m_ty) = self.resolve_member_access(inner_obj, inner_member)?;
+                let dest = self.next_temp();
+                self.temp_types.insert(dest, m_ty.clone());
+                self.emit(IrInstruction::GetMember {
+                    dest,
+                    base: b_op,
+                    offset,
+                    member_type: m_ty.clone(),
+                });
+                (Operand::Temp(dest), m_ty)
+            }
+            _ => {
+                let op = self.lower_expression(object);
+                let ty = self.infer_operand_type(&op);
+                (op, ty)
+            }
+        };
+
+        let struct_name = match &base_ty {
+            VbType::UserDefined(s) => s.clone(),
+            _ => return None,
+        };
+        let layout = self.udt_layouts.get(&struct_name.to_ascii_uppercase())?;
+        let m = layout
+            .members
+            .iter()
+            .find(|m| m.name.eq_ignore_ascii_case(member))?;
+        Some((base_op, m.offset, m.vb_type.clone()))
+    }
+
     fn next_temp(&mut self) -> usize {
         let t = self.temp_counter;
         self.temp_counter += 1;
@@ -175,7 +274,42 @@ impl AstToIrLowering {
         self.module_globals.clear();
         self.globals_list.clear();
         self.functions.clear();
+        self.udt_layouts.clear();
+        self.enum_defs.clear();
+        self.enum_constants.clear();
 
+        // Preliminary pass: register all Type and Enum declarations first
+        for decl in &file.declarations {
+            match decl {
+                Declaration::Type(t) => {
+                    let raw_members: Vec<(String, VbType)> = t
+                        .members
+                        .iter()
+                        .map(|m| (m.name.clone(), self.resolve_type_spec(&m.type_spec)))
+                        .collect();
+                    let layout = crate::types::UdtLayout::compute_with_layouts(&t.name, &raw_members, &self.udt_layouts, true);
+                    self.udt_layouts.insert(t.name.to_ascii_uppercase(), layout);
+                }
+                Declaration::Enum(e) => {
+                    let raw_members: Vec<(String, Option<i32>)> = e
+                        .members
+                        .iter()
+                        .map(|m| (m.name.clone(), m.value))
+                        .collect();
+                    let enum_def = crate::types::EnumDefinition::new(&e.name, &raw_members);
+                    self.enum_defs.insert(e.name.to_ascii_uppercase(), enum_def.clone());
+                    for m in &enum_def.members {
+                        self.enum_constants.insert(
+                            m.name.to_ascii_uppercase(),
+                            (m.value, VbType::Long),
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // First pass: register module variables and function signatures
         for decl in &file.declarations {
             match decl {
                 Declaration::ModuleVariables(v) => {
@@ -183,7 +317,7 @@ impl AstToIrLowering {
                         let mut vb_type = var
                             .type_spec
                             .as_ref()
-                            .map(|ts| VbType::from_name(&ts.name))
+                            .map(|ts| self.resolve_type_spec(ts))
                             .unwrap_or(VbType::Variant);
                         if var.dimensions.is_some() {
                             vb_type = VbType::Array(Box::new(vb_type));
@@ -203,7 +337,7 @@ impl AstToIrLowering {
                     let ret_ty = f
                         .return_type
                         .as_ref()
-                        .map(|ts| VbType::from_name(&ts.name))
+                        .map(|ts| self.resolve_type_spec(ts))
                         .unwrap_or(VbType::Variant);
                     let key = f.name.to_ascii_uppercase();
                     self.functions.insert(key, (f.name.clone(), ret_ty));
@@ -231,6 +365,7 @@ impl AstToIrLowering {
             name: module_name.to_string(),
             globals: self.globals_list.clone(),
             functions,
+            udt_layouts: self.udt_layouts.clone(),
         }
     }
 
@@ -255,7 +390,7 @@ impl AstToIrLowering {
                 let mut ty = p
                     .param_type
                     .as_ref()
-                    .map(|ts| VbType::from_name(&ts.name))
+                    .map(|ts| self.resolve_type_spec(ts))
                     .unwrap_or(VbType::Variant);
                 if let Some(ref pt) = p.param_type {
                     if !pt.array_dimensions.is_empty() {
@@ -334,7 +469,7 @@ impl AstToIrLowering {
                 let mut ty = p
                     .param_type
                     .as_ref()
-                    .map(|ts| VbType::from_name(&ts.name))
+                    .map(|ts| self.resolve_type_spec(ts))
                     .unwrap_or(VbType::Variant);
                 if let Some(ref pt) = p.param_type {
                     if !pt.array_dimensions.is_empty() {
@@ -354,7 +489,7 @@ impl AstToIrLowering {
         let ret_ty = func
             .return_type
             .as_ref()
-            .map(|ts| VbType::from_name(&ts.name))
+            .map(|ts| self.resolve_type_spec(ts))
             .unwrap_or(VbType::Variant);
 
         for param in &params {
@@ -426,7 +561,7 @@ impl AstToIrLowering {
                             let mut vb_type = v
                                 .type_spec
                                 .as_ref()
-                                .map(|ts| VbType::from_name(&ts.name))
+                                .map(|ts| self.resolve_type_spec(ts))
                                 .unwrap_or(VbType::Variant);
                             if v.dimensions.is_some() {
                                 vb_type = VbType::Array(Box::new(vb_type));
@@ -447,7 +582,7 @@ impl AstToIrLowering {
                         for v in variables {
                             let (_prev_target_op, target_ty) = self.resolve_variable(&v.name);
                             let elem_type = if let Some(ts) = &v.type_spec {
-                                VbType::from_name(&ts.name)
+                                self.resolve_type_spec(ts)
                             } else {
                                 match &target_ty {
                                     VbType::Array(elem) => (**elem).clone(),
@@ -509,7 +644,7 @@ impl AstToIrLowering {
                             let mut vb_type = v
                                 .type_spec
                                 .as_ref()
-                                .map(|ts| VbType::from_name(&ts.name))
+                                .map(|ts| self.resolve_type_spec(ts))
                                 .unwrap_or(VbType::Variant);
                             if v.dimensions.is_some() {
                                 vb_type = VbType::Array(Box::new(vb_type));
@@ -549,7 +684,7 @@ impl AstToIrLowering {
                                         dims: bounds.len(),
                                         bounds,
                                         elem_type: elem_ty,
-                                    });
+                                     });
                                     self.emit(IrInstruction::Store {
                                         dest: Operand::Local(v.name.clone()),
                                         src: Operand::Temp(create_dest),
@@ -567,7 +702,7 @@ impl AstToIrLowering {
                                     dest: Operand::Local(v.name.clone()),
                                     src: init_op,
                                 });
-                            } else {
+                            } else if !matches!(vb_type, VbType::UserDefined(_)) {
                                 let def_const = default_constant_for_type(&vb_type);
                                 self.emit(IrInstruction::Store {
                                     dest: Operand::Local(v.name.clone()),
@@ -579,6 +714,110 @@ impl AstToIrLowering {
                 }
             }
             Statement::Assignment { target, value, .. } => {
+                if let Expression::MemberAccess { object, member } = target {
+                    if let Some((base_op, offset, member_type)) = self.resolve_member_access(object, member) {
+                        let val_op = self.lower_expression(value);
+                        let val_ty = self.infer_operand_type(&val_op);
+                        let final_val_op = if matches!(member_type, VbType::FixedString(_)) {
+                            self.coerce_to_string(val_op)
+                        } else if member_type != VbType::Unknown
+                            && val_ty != VbType::Unknown
+                            && member_type != val_ty
+                            && val_ty.can_coerce_to(&member_type)
+                        {
+                            match (&val_op, &member_type) {
+                                (Operand::Constant(IrConstant::Int(n, _)), VbType::Single | VbType::Double) => {
+                                    Operand::Constant(IrConstant::Float(*n as f64))
+                                }
+                                (Operand::Constant(IrConstant::Int(n, _)), VbType::Byte | VbType::Integer | VbType::Long | VbType::Currency | VbType::Enum(_)) => {
+                                    Operand::Constant(IrConstant::Int(*n, member_type.clone()))
+                                }
+                                _ => {
+                                    let cast_temp = self.next_temp();
+                                    self.temp_types.insert(cast_temp, member_type.clone());
+                                    self.emit(IrInstruction::Coerce {
+                                        dest: cast_temp,
+                                        src: val_op,
+                                        from_type: val_ty,
+                                        to_type: member_type.clone(),
+                                    });
+                                    Operand::Temp(cast_temp)
+                                }
+                            }
+                        } else {
+                            val_op
+                        };
+
+                        self.emit(IrInstruction::SetMember {
+                            base: base_op,
+                            offset,
+                            value: final_val_op,
+                            member_type,
+                        });
+                        return;
+                    }
+                } else if let Expression::WithMemberAccess(member) = target {
+                    let with_res = if let Some(ctx) = self.with_stack.last().cloned() {
+                        let struct_name = match &ctx.vb_type {
+                            VbType::UserDefined(s) => s.clone(),
+                            _ => "".to_string(),
+                        };
+                        if let Some(layout) = self.udt_layouts.get(&struct_name.to_ascii_uppercase()) {
+                            layout
+                                .members
+                                .iter()
+                                .find(|m| m.name.eq_ignore_ascii_case(member))
+                                .map(|m| (ctx.base_operand.clone(), m.offset, m.vb_type.clone()))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+
+                    if let Some((base_op, offset, member_type)) = with_res {
+                        let val_op = self.lower_expression(value);
+                        let val_ty = self.infer_operand_type(&val_op);
+                        let final_val_op = if matches!(member_type, VbType::FixedString(_)) {
+                            self.coerce_to_string(val_op)
+                        } else if member_type != VbType::Unknown
+                            && val_ty != VbType::Unknown
+                            && member_type != val_ty
+                            && val_ty.can_coerce_to(&member_type)
+                        {
+                            match (&val_op, &member_type) {
+                                (Operand::Constant(IrConstant::Int(n, _)), VbType::Single | VbType::Double) => {
+                                    Operand::Constant(IrConstant::Float(*n as f64))
+                                }
+                                (Operand::Constant(IrConstant::Int(n, _)), VbType::Byte | VbType::Integer | VbType::Long | VbType::Currency | VbType::Enum(_)) => {
+                                    Operand::Constant(IrConstant::Int(*n, member_type.clone()))
+                                }
+                                _ => {
+                                    let cast_temp = self.next_temp();
+                                    self.temp_types.insert(cast_temp, member_type.clone());
+                                    self.emit(IrInstruction::Coerce {
+                                        dest: cast_temp,
+                                        src: val_op,
+                                        from_type: val_ty,
+                                        to_type: member_type.clone(),
+                                    });
+                                    Operand::Temp(cast_temp)
+                                }
+                            }
+                        } else {
+                            val_op
+                        };
+
+                        self.emit(IrInstruction::SetMember {
+                            base: base_op,
+                            offset,
+                            value: final_val_op,
+                            member_type,
+                        });
+                        return;
+                    }
+                }
+
                 if let Expression::IndexAccess { target: arr_target, indices } = target {
                     let val_op = self.lower_expression(value);
                     let val_ty = self.infer_operand_type(&val_op);
@@ -598,7 +837,7 @@ impl AstToIrLowering {
                             (Operand::Constant(IrConstant::Int(n, _)), VbType::Single | VbType::Double) => {
                                 Operand::Constant(IrConstant::Float(*n as f64))
                             }
-                            (Operand::Constant(IrConstant::Int(n, _)), VbType::Byte | VbType::Integer | VbType::Long | VbType::Currency) => {
+                            (Operand::Constant(IrConstant::Int(n, _)), VbType::Byte | VbType::Integer | VbType::Long | VbType::Currency | VbType::Enum(_)) => {
                                 Operand::Constant(IrConstant::Int(*n, elem_type.clone()))
                             }
                             _ => {
@@ -632,7 +871,9 @@ impl AstToIrLowering {
                     let val_op = self.lower_expression(value);
                     let val_ty = self.infer_operand_type(&val_op);
 
-                    let final_val_op = if target_ty != VbType::Unknown
+                    let final_val_op = if matches!(target_ty, VbType::UserDefined(_)) {
+                        val_op
+                    } else if target_ty != VbType::Unknown
                         && val_ty != VbType::Unknown
                         && target_ty != val_ty
                         && val_ty.can_coerce_to(&target_ty)
@@ -641,7 +882,7 @@ impl AstToIrLowering {
                             (Operand::Constant(IrConstant::Int(n, _)), VbType::Single | VbType::Double) => {
                                 Operand::Constant(IrConstant::Float(*n as f64))
                             }
-                            (Operand::Constant(IrConstant::Int(n, _)), VbType::Byte | VbType::Integer | VbType::Long | VbType::Currency) => {
+                            (Operand::Constant(IrConstant::Int(n, _)), VbType::Byte | VbType::Integer | VbType::Long | VbType::Currency | VbType::Enum(_)) => {
                                 Operand::Constant(IrConstant::Int(*n, target_ty.clone()))
                             }
                             _ => {
@@ -1007,6 +1248,67 @@ impl AstToIrLowering {
                 let exit_idx = self.create_block(&exit_label);
                 self.switch_to_block(exit_idx);
             }
+            Statement::With { target, body, .. } => {
+                let (base_op, base_ty) = match target {
+                    Expression::Variable(name) => self.resolve_variable(name),
+                    Expression::WithMemberAccess(member) => {
+                        if let Some(ctx) = self.with_stack.last().cloned() {
+                            let struct_name = match &ctx.vb_type {
+                                VbType::UserDefined(s) => s.clone(),
+                                _ => "".to_string(),
+                            };
+                            if let Some(layout) = self.udt_layouts.get(&struct_name.to_ascii_uppercase()).cloned() {
+                                if let Some(m) = layout.members.iter().find(|m| m.name.eq_ignore_ascii_case(member)).cloned() {
+                                    let dest = self.next_temp();
+                                    self.temp_types.insert(dest, m.vb_type.clone());
+                                    self.emit(IrInstruction::GetMember {
+                                        dest,
+                                        base: ctx.base_operand,
+                                        offset: m.offset,
+                                        member_type: m.vb_type.clone(),
+                                    });
+                                    (Operand::Temp(dest), m.vb_type)
+                                } else {
+                                    (Operand::Local("unknown".to_string()), VbType::Unknown)
+                                }
+                            } else {
+                                (Operand::Local("unknown".to_string()), VbType::Unknown)
+                            }
+                        } else {
+                            (Operand::Local("unknown".to_string()), VbType::Unknown)
+                        }
+                    }
+                    Expression::MemberAccess { object, member } => {
+                        if let Some((b_op, offset, m_ty)) = self.resolve_member_access(object, member) {
+                            let dest = self.next_temp();
+                            self.temp_types.insert(dest, m_ty.clone());
+                            self.emit(IrInstruction::GetMember {
+                                dest,
+                                base: b_op,
+                                offset,
+                                member_type: m_ty.clone(),
+                            });
+                            (Operand::Temp(dest), m_ty)
+                        } else {
+                            (Operand::Local("unknown".to_string()), VbType::Unknown)
+                        }
+                    }
+                    _ => {
+                        let op = self.lower_expression(target);
+                        let ty = self.infer_operand_type(&op);
+                        (op, ty)
+                    }
+                };
+
+                self.with_stack.push(WithContext {
+                    base_operand: base_op,
+                    vb_type: base_ty,
+                });
+                for s in body {
+                    self.lower_statement(s);
+                }
+                self.with_stack.pop();
+            }
             Statement::SelectCase {
                 expression,
                 cases,
@@ -1278,6 +1580,12 @@ impl AstToIrLowering {
             },
             Expression::Variable(name) => {
                 let (target_op, target_ty) = self.resolve_variable(name);
+                if matches!(target_ty, VbType::UserDefined(_)) {
+                    return target_op;
+                }
+                if matches!(target_op, Operand::Constant(_)) {
+                    return target_op;
+                }
                 let temp = self.next_temp();
                 self.temp_types.insert(temp, target_ty);
                 self.emit(IrInstruction::Load {
@@ -2073,7 +2381,58 @@ impl AstToIrLowering {
                 });
                 Operand::Temp(dest)
             }
-            _ => Operand::Constant(IrConstant::Null),
+            Expression::MemberAccess { object, member } => {
+                if let Expression::Variable(enum_name) = object.as_ref() {
+                    let key = enum_name.to_ascii_uppercase();
+                    if let Some(enum_def) = self.enum_defs.get(&key) {
+                        if let Some(m) = enum_def.members.iter().find(|m| m.name.eq_ignore_ascii_case(member)) {
+                            return Operand::Constant(IrConstant::Int(m.value as i64, VbType::Long));
+                        }
+                    }
+                }
+                if let Some((base_op, offset, member_type)) = self.resolve_member_access(object, member) {
+                    let dest = self.next_temp();
+                    self.temp_types.insert(dest, member_type.clone());
+                    self.emit(IrInstruction::GetMember {
+                        dest,
+                        base: base_op,
+                        offset,
+                        member_type,
+                    });
+                    Operand::Temp(dest)
+                } else {
+                    Operand::Constant(IrConstant::Int(0, VbType::Long))
+                }
+            }
+            Expression::WithMemberAccess(member) => {
+                if let Some(ctx) = self.with_stack.last().cloned() {
+                    let struct_name = match &ctx.vb_type {
+                        VbType::UserDefined(s) => s.clone(),
+                        _ => "".to_string(),
+                    };
+                    let member_info = if let Some(layout) = self.udt_layouts.get(&struct_name.to_ascii_uppercase()) {
+                        layout
+                            .members
+                            .iter()
+                            .find(|m| m.name.eq_ignore_ascii_case(member))
+                            .map(|m| (m.offset, m.vb_type.clone()))
+                    } else {
+                        None
+                    };
+                    if let Some((offset, member_type)) = member_info {
+                        let dest = self.next_temp();
+                        self.temp_types.insert(dest, member_type.clone());
+                        self.emit(IrInstruction::GetMember {
+                            dest,
+                            base: ctx.base_operand,
+                            offset,
+                            member_type,
+                        });
+                        return Operand::Temp(dest);
+                    }
+                }
+                Operand::Constant(IrConstant::Int(0, VbType::Long))
+            }
         }
     }
 }

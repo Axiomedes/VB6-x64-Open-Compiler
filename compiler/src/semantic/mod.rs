@@ -7,6 +7,7 @@ use crate::ast::stmt::*;
 use crate::ast::SourceFile;
 use crate::symbols::*;
 use crate::types::*;
+use std::collections::HashMap;
 use thiserror::Error;
 
 #[derive(Debug, Clone, Error, PartialEq)]
@@ -79,6 +80,9 @@ pub struct SemanticAnalyzer {
     pub symbol_table: SymbolTable,
     pub errors: Vec<SemanticError>,
     pub option_explicit: bool,
+    pub udt_layouts: HashMap<String, crate::types::UdtLayout>,
+    pub enum_defs: HashMap<String, crate::types::EnumDefinition>,
+    pub with_stack: Vec<VbType>,
     loop_depth_for: usize,
     loop_depth_do: usize,
 }
@@ -95,17 +99,46 @@ impl SemanticAnalyzer {
             symbol_table: SymbolTable::new(),
             errors: Vec::new(),
             option_explicit: false,
+            udt_layouts: HashMap::new(),
+            enum_defs: HashMap::new(),
+            with_stack: Vec::new(),
             loop_depth_for: 0,
             loop_depth_do: 0,
+        }
+    }
+
+    pub fn resolve_type_spec(&self, ts: &crate::ast::types::TypeSpec) -> VbType {
+        let key = ts.name.to_ascii_uppercase();
+        if self.enum_defs.contains_key(&key) {
+            VbType::Enum(ts.name.clone())
+        } else if self.udt_layouts.contains_key(&key) {
+            VbType::UserDefined(ts.name.clone())
+        } else if let Some(len) = ts.fixed_length {
+            if ts.name.eq_ignore_ascii_case("String") {
+                VbType::FixedString(len)
+            } else {
+                VbType::from_name(&ts.name)
+            }
+        } else {
+            VbType::from_name(&ts.name)
         }
     }
 
     pub fn analyze_file(&mut self, file: &SourceFile) -> Result<(), Vec<SemanticError>> {
         self.symbol_table.enter_scope(ScopeKind::Module);
 
-        // First pass: register all procedure headers and module-level symbols
+        // Preliminary pass: register all Type and Enum declarations first
         for decl in &file.declarations {
-            self.declare_symbol(decl);
+            if matches!(decl, Declaration::Type(_) | Declaration::Enum(_)) {
+                self.declare_symbol(decl);
+            }
+        }
+
+        // First pass: register procedure headers and module-level symbols
+        for decl in &file.declarations {
+            if !matches!(decl, Declaration::Type(_) | Declaration::Enum(_)) {
+                self.declare_symbol(decl);
+            }
         }
 
         // Second pass: analyze bodies, statements, and expressions
@@ -161,7 +194,7 @@ impl SemanticAnalyzer {
             let mut ty = p
                 .param_type
                 .as_ref()
-                .map(|t| VbType::from_name(&t.name))
+                .map(|t| self.resolve_type_spec(t))
                 .unwrap_or(VbType::Variant);
             if let Some(ref pt) = p.param_type {
                 if !pt.array_dimensions.is_empty() {
@@ -210,7 +243,7 @@ impl SemanticAnalyzer {
                 let ret_ty = f
                     .return_type
                     .as_ref()
-                    .map(|t| VbType::from_name(&t.name))
+                    .map(|t| self.resolve_type_spec(t))
                     .unwrap_or(VbType::Variant);
 
                 let sym = Symbol {
@@ -237,7 +270,7 @@ impl SemanticAnalyzer {
                     let mut vb_type = var
                         .type_spec
                         .as_ref()
-                        .map(|t| VbType::from_name(&t.name))
+                        .map(|t| self.resolve_type_spec(t))
                         .unwrap_or(VbType::Variant);
                     if var.dimensions.is_some() {
                         vb_type = VbType::Array(Box::new(vb_type));
@@ -266,9 +299,10 @@ impl SemanticAnalyzer {
                 let raw_members: Vec<(String, VbType)> = t
                     .members
                     .iter()
-                    .map(|m| (m.name.clone(), VbType::from_name(&m.type_spec.name)))
+                    .map(|m| (m.name.clone(), self.resolve_type_spec(&m.type_spec)))
                     .collect();
-                let _layout = crate::types::UdtLayout::compute(&t.name, &raw_members, true);
+                let layout = crate::types::UdtLayout::compute_with_layouts(&t.name, &raw_members, &self.udt_layouts, true);
+                self.udt_layouts.insert(t.name.to_ascii_uppercase(), layout);
                 let sym = Symbol {
                     name: t.name.clone(),
                     kind: SymbolKind::UserDefinedType,
@@ -322,7 +356,7 @@ impl SemanticAnalyzer {
                     let mut vb_type = p
                         .param_type
                         .as_ref()
-                        .map(|t| VbType::from_name(&t.name))
+                        .map(|t| self.resolve_type_spec(t))
                         .unwrap_or(VbType::Variant);
                     if let Some(ref pt) = p.param_type {
                         if !pt.array_dimensions.is_empty() {
@@ -354,7 +388,7 @@ impl SemanticAnalyzer {
                     let mut vb_type = p
                         .param_type
                         .as_ref()
-                        .map(|t| VbType::from_name(&t.name))
+                        .map(|t| self.resolve_type_spec(t))
                         .unwrap_or(VbType::Variant);
                     if let Some(ref pt) = p.param_type {
                         if !pt.array_dimensions.is_empty() {
@@ -395,7 +429,7 @@ impl SemanticAnalyzer {
                     let mut vb_type = v
                         .type_spec
                         .as_ref()
-                        .map(|t| VbType::from_name(&t.name))
+                        .map(|t| self.resolve_type_spec(t))
                         .unwrap_or(VbType::Variant);
                     if v.dimensions.is_some() {
                         vb_type = VbType::Array(Box::new(vb_type));
@@ -644,6 +678,14 @@ impl SemanticAnalyzer {
                 for arg in arguments {
                     let _ = self.infer_expression_type(arg);
                 }
+            }
+            Statement::With { target, body, .. } => {
+                let target_ty = self.infer_expression_type(target);
+                self.with_stack.push(target_ty);
+                for s in body {
+                    self.analyze_statement(s);
+                }
+                self.with_stack.pop();
             }
             _ => {}
         }
@@ -964,7 +1006,29 @@ impl SemanticAnalyzer {
                 }
             }
             Expression::Paren(inner) => self.infer_expression_type(inner),
-            _ => VbType::Variant,
+            Expression::MemberAccess { object, member } => {
+                let obj_ty = self.infer_expression_type(object);
+                if let VbType::UserDefined(ref udt_name) = obj_ty {
+                    if let Some(layout) = self.udt_layouts.get(&udt_name.to_ascii_uppercase()) {
+                        if let Some(mem) = layout.find_member(member) {
+                            return mem.vb_type.clone();
+                        }
+                    }
+                }
+                VbType::Variant
+            }
+            Expression::WithMemberAccess(member) => {
+                if let Some(top_ty) = self.with_stack.last() {
+                    if let VbType::UserDefined(ref udt_name) = top_ty {
+                        if let Some(layout) = self.udt_layouts.get(&udt_name.to_ascii_uppercase()) {
+                            if let Some(mem) = layout.find_member(member) {
+                                return mem.vb_type.clone();
+                            }
+                        }
+                    }
+                }
+                VbType::Variant
+            }
         }
     }
 }
